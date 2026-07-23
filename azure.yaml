@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+requiredVersions:
+    extensions:
+        azure.ai.agents: '>=0.1.34-preview'
+        azure.ai.routines: '>=1.0.0-beta.1'
+        microsoft.foundry: '>=1.0.0-beta.1'
+name: dailydigest
+metadata:
+    template: simple-foundry-hosted-agent-dotnet-aigateway@1.0.0
+services:
+    ai-project:
+        host: azure.ai.project
+    daily-repo-digest:
+        host: azure.ai.routine
+        uses:
+            - simple-foundry-hosted-agent-dotnet-aigateway
+        action:
+            agent_name: simple-foundry-hosted-agent-dotnet-aigateway
+            input: Create a concise daily repo digest for microsoft/agent-framework.
+            type: invoke_agent_responses_api
+        description: Create a daily repo digest at 9 AM Pacific time.
+        enabled: true
+        triggers:
+            default:
+                cron_expression: 0 9 * * *
+                time_zone: America/Los_Angeles
+                type: schedule
+    simple-foundry-hosted-agent-dotnet-aigateway:
+        project: ./agent
+        host: azure.ai.agent
+        language: docker
+        docker:
+            remoteBuild: true
+        uses:
+            - ai-project
+        config:
+            startupCommand: dotnet FoundryHostedAgent.AIGateway.dll
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: Daily repo digest agent hosted by Microsoft Foundry and routed through AI Gateway.
+        environmentVariables:
+            - name: AZURE_AI_GATEWAY_ENDPOINT
+              value: ${AZURE_AI_GATEWAY_ENDPOINT}
+            - name: AZURE_AI_GATEWAY_MODEL
+              value: ${AZURE_AI_GATEWAY_MODEL}
+            - name: AZURE_AI_GATEWAY_MINI_MODEL
+              value: ${AZURE_AI_GATEWAY_MINI_MODEL}
+            - name: AZURE_AI_GATEWAY_API_KEY
+              value: ${AZURE_AI_GATEWAY_API_KEY}
+            - name: TOOLBOX_ENDPOINT
+              value: ${TOOLBOX_ENDPOINT}
+            - name: TOOLBOX_NAME
+              value: ${TOOLBOX_NAME}
+            - name: GITHUB_REPOSITORY
+              value: ${GITHUB_REPOSITORY}
+        kind: hosted
+        metadata:
+            tags:
+                - Agent Framework
+                - AI Agent Hosting
+                - Azure AI AgentServer
+                - AI Gateway
+                - MCP
+                - Responses Protocol
+                - .NET
+        name: simple-foundry-hosted-agent-dotnet-aigateway
+        protocols:
+            - protocol: responses
+              version: 2.0.0
+infra:
+    provider: bicep
+    path: infra
+    module: main
+hooks:
+    postdown:
+        windows:
+            shell: pwsh
+            run: ./infra/scripts/manage-ai-gateway-lifecycle.ps1 cleanup
+        posix:
+            shell: sh
+            run: bash ./infra/scripts/manage-ai-gateway-lifecycle.sh cleanup
+    postprovision:
+        windows:
+            shell: pwsh
+            run: ./infra/scripts/configure-ai-gateway.ps1
+            interactive: true
+        posix:
+            shell: sh
+            run: bash ./infra/scripts/configure-ai-gateway.sh
+            interactive: true
+    preprovision:
+        windows:
+            shell: pwsh
+            run: ./infra/scripts/configure-ai-gateway.ps1 -PrepareBicep
+        posix:
+            shell: sh
+            run: bash ./infra/scripts/configure-ai-gateway.sh --prepare-bicep
