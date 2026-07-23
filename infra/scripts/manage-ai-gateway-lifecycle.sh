@@ -94,8 +94,7 @@ if [ -z "$resource_group" ] || [ -z "$gateway_name" ]; then
   candidates="$(az resource list \
     --subscription "$subscription_id" \
     --resource-type Microsoft.ApiManagement/service \
-    --tag "azd-env-name=${environment_name}" \
-    --query "[?sku.name=='AIGateway'].[name,resourceGroup,location]" \
+    --query "[?tags.\"azd-env-name\"=='${environment_name}' && sku.name=='AIGateway'].[name,resourceGroup,location]" \
     -o tsv)"
   candidate_count="$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d ' ')"
   if [ "$candidate_count" -eq 0 ]; then

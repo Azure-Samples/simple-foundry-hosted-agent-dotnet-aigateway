@@ -98,8 +98,7 @@ if ([string]::IsNullOrWhiteSpace($resourceGroup) -or [string]::IsNullOrWhiteSpac
         az resource list `
             --subscription $subscriptionId `
             --resource-type Microsoft.ApiManagement/service `
-            --tag "azd-env-name=$environmentName" `
-            --query "[?sku.name=='AIGateway'].{name:name,resourceGroup:resourceGroup,location:location}" `
+            --query "[?tags.`"azd-env-name`"=='$environmentName' && sku.name=='AIGateway'].{name:name,resourceGroup:resourceGroup,location:location}" `
             -o json | ConvertFrom-Json
     )
     if ($candidates.Count -eq 0) {
