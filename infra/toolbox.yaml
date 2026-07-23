@@ -1,0 +1,6 @@
+description: Read-only GitHub MCP through AI Gateway
+tools:
+  - type: mcp
+    server_label: aigw-github
+    project_connection_id: aigw-github
+    require_approval: "never"

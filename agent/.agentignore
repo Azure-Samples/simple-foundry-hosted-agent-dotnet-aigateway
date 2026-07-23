@@ -1,0 +1,16 @@
+# Files excluded from agent code deployment packaging.
+# Uses .gitignore syntax.
+
+agent.yaml
+agent.manifest.yaml
+azure.yaml
+.agentignore
+
+.env
+.env.*
+.azure/
+.git/
+
+bin/
+obj/
+TestResults/

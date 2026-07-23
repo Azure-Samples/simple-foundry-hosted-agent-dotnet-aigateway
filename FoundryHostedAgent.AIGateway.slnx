@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/agent/">
+    <Project Path="agent/FoundryHostedAgent.AIGateway.csproj" />
+  </Folder>
+  <Folder Name="/chat/">
+    <Project Path="chat/FoundryHostedAgent.AIGateway.Chat.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FoundryHostedAgent.AIGateway.Tests/FoundryHostedAgent.AIGateway.Tests.csproj" />
+  </Folder>
+</Solution>
