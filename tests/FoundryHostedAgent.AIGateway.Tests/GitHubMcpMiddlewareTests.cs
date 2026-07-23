@@ -17,21 +17,6 @@ public sealed class GitHubMcpMiddlewareTests
         var cases = new[]
         {
             (
-                "github_search_repositories",
-                new Dictionary<string, object?>
-                {
-                    ["minimal_output"] = false,
-                    ["perPage"] = 100,
-                    ["page"] = 8
-                },
-                new Dictionary<string, object?>
-                {
-                    ["query"] = "microsoft/agent-framework",
-                    ["minimal_output"] = true,
-                    ["perPage"] = 1,
-                    ["page"] = 1
-                }),
-            (
                 "github_list_pull_requests",
                 new Dictionary<string, object?> { ["state"] = "open", ["page"] = 8 },
                 new Dictionary<string, object?>
@@ -45,16 +30,22 @@ public sealed class GitHubMcpMiddlewareTests
                     ["page"] = 1
                 }),
             (
-                "github_search_issues",
-                new Dictionary<string, object?> { ["query"] = "wrong", ["page"] = 8 },
+                "github_list_issues",
                 new Dictionary<string, object?>
                 {
                     ["owner"] = "microsoft",
                     ["repo"] = "agent-framework",
-                    ["query"] = "is:issue updated:>=2026-07-19T16:00:00Z",
-                    ["sort"] = "updated",
-                    ["order"] = "desc",
-                    ["page"] = 1
+                    ["query"] = "is:issue",
+                    ["page"] = 8
+                },
+                new Dictionary<string, object?>
+                {
+                    ["owner"] = "microsoft",
+                    ["repo"] = "agent-framework",
+                    ["orderBy"] = "UPDATED_AT",
+                    ["direction"] = "DESC",
+                    ["since"] = "2026-07-19T16:00:00Z",
+                    ["perPage"] = 100
                 })
         };
 
@@ -92,35 +83,6 @@ public sealed class GitHubMcpMiddlewareTests
         var filter = Assert.IsType<Dictionary<string, object?>>(arguments["workflow_runs_filter"]);
         Assert.Equal("main", filter["branch"]);
         Assert.Equal("completed", filter["status"]);
-    }
-
-    [Fact]
-    public void CompactsRepositoryFields()
-    {
-        var payload = JsonNode.Parse(
-            """
-            {
-              "total_count": 1,
-              "incomplete_results": false,
-              "items": [{
-                "full_name": "microsoft/agent-framework",
-                "description": "Agents",
-                "html_url": "https://github.com/microsoft/agent-framework",
-                "stargazers_count": 100,
-                "default_branch": "main",
-                "owner": {"login": "microsoft"}
-              }]
-            }
-            """)!;
-
-        var compact = GitHubMcpMiddleware.CompactPayload(
-            "github_search_repositories",
-            payload,
-            Cutoff);
-
-        var item = compact["items"]![0]!.AsObject();
-        Assert.Equal("microsoft/agent-framework", item["full_name"]!.GetValue<string>());
-        Assert.False(item.ContainsKey("owner"));
     }
 
     [Fact]
@@ -165,26 +127,35 @@ public sealed class GitHubMcpMiddlewareTests
         var payload = JsonNode.Parse(
             """
             {
-              "total_count": 1,
-              "incomplete_results": false,
-              "items": [{
-                "number": 3,
-                "title": "Issue",
-                "state": "open",
-                "updated_at": "2026-07-20T12:00:00Z",
-                "body": "large body",
-                "user": {"login": "octocat"},
-                "labels": [{"name": "help wanted"}]
-              }]
+              "totalCount": 1,
+              "pageInfo": {"hasNextPage": false},
+              "issues": [
+                {
+                  "number": 3,
+                  "title": "Issue",
+                  "state": "open",
+                  "updated_at": "2026-07-20T12:00:00Z",
+                  "body": "large body",
+                  "user": {"login": "octocat"},
+                  "labels": ["help wanted"]
+                },
+                {
+                  "number": 1,
+                  "title": "Old",
+                  "updated_at": "2026-07-18T12:00:00Z"
+                }
+              ]
             }
             """)!;
 
         var compact = GitHubMcpMiddleware.CompactPayload(
-            "github_search_issues",
+            "github_list_issues",
             payload,
             Cutoff);
 
-        var item = compact["items"]![0]!.AsObject();
+        Assert.Equal(1, compact["total_count"]!.GetValue<int>());
+        Assert.Equal(1, compact["returned_count"]!.GetValue<int>());
+        var item = compact["issues"]![0]!.AsObject();
         Assert.Equal("octocat", item["author"]!.GetValue<string>());
         Assert.Equal("help wanted", item["labels"]![0]!.GetValue<string>());
         Assert.False(item.ContainsKey("body"));
@@ -239,7 +210,7 @@ public sealed class GitHubMcpMiddlewareTests
         const string text = "GitHub MCP returned an error";
         Assert.Equal(
             text,
-            GitHubMcpMiddleware.CompactText("github_search_issues", text, Cutoff));
+            GitHubMcpMiddleware.CompactText("github_list_issues", text, Cutoff));
     }
 
     [Fact]
@@ -248,8 +219,8 @@ public sealed class GitHubMcpMiddlewareTests
         var content = new TextContent(
             """
             {
-              "total_count": 1,
-              "items": [{"number": 4, "title": "Issue", "body": "large body"}]
+              "totalCount": 1,
+              "issues": [{"number": 4, "title": "Issue", "body": "large body"}]
             }
             """)
         {
@@ -260,7 +231,7 @@ public sealed class GitHubMcpMiddlewareTests
         };
 
         var compact = Assert.IsType<TextContent>(
-            GitHubMcpMiddleware.CompactResult("github_search_issues", content, Cutoff));
+            GitHubMcpMiddleware.CompactResult("github_list_issues", content, Cutoff));
 
         Assert.Same(content.AdditionalProperties, compact.AdditionalProperties);
         Assert.DoesNotContain("large body", compact.Text, StringComparison.Ordinal);

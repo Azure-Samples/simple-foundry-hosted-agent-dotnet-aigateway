@@ -52,25 +52,101 @@ The hosted runtime injects `FOUNDRY_PROJECT_ENDPOINT`. `AddFoundryToolboxes` der
 
 The deployment hook obtains the active GitHub CLI token without printing it or saving it to the azd environment. A dedicated fine-grained token is the safest option. Restrict it to the repository configured by `GITHUB_REPOSITORY`, grant read-only Metadata, Actions, Issues, and Pull requests permissions, and grant no organization or account permissions. Contents access is not required by the allowlisted tools.
 
-Before updating the ToolServer, the hook validates the `owner/repository` format and verifies that the credential can read repository metadata, pull requests, issues, and workflow runs. Agent middleware overwrites repository arguments on every tool call with the configured owner and repository. The hook cannot determine whether the credential has extra permissions, so the person provisioning the sample remains responsible for limiting the token at issuance.
+Before updating the ToolServer, the hook validates the `owner/repository` format, then runs an **advisory, non-blocking** credential check: it warns (never fails) when the selected credential is broader than the recommended least-privilege token, and warns if a fine-grained token cannot read repository metadata, pull requests, issues, or workflow runs. This keeps the documented `gh auth status; azd up` flow working with any login while still nudging operators toward a read-only, repository-scoped token. Agent middleware overwrites repository arguments on every tool call with the configured owner and repository. The hook cannot determine whether the credential has extra permissions, so the person provisioning the sample remains responsible for limiting the token at issuance — see [Tighten the GitHub credential to least privilege](#tighten-the-github-credential-to-least-privilege).
 
 The ToolServer sends these headers:
 
 - `Authorization: Bearer <active gh token>`
 - `X-MCP-Readonly: true`
-- `X-MCP-Tools: search_repositories,list_pull_requests,search_issues,actions_list`
+- `X-MCP-Tools: list_pull_requests,list_issues,actions_list`
 
 The ToolServer uses `failureMode: failClosed`. `infra/toolbox.yaml` also sets `require_approval: "never"` because the exposed tools are read-only and explicitly allowlisted.
 
 The application does not accept a GitHub token environment variable. A local or hosted agent invocation reaches GitHub only through Foundry Toolbox and AI Gateway.
 
+## Tighten the GitHub credential to least privilege
+
+If `azd up` prints a warning that the GitHub credential is a broad, account-wide OAuth or classic token, provisioning still succeeds, but the postprovision hook stores that credential in the cloud AI Gateway ToolServer. Replace it with a fine-grained, repository-scoped, read-only token by following both parts below: create the token in the GitHub portal, then re-apply it from the command line.
+
+> **Seeing `403 Forbidden` or empty MCP results for a public repo you do not own (for example `microsoft/agent-framework`)?** The token was applied, but it is being refused. Two common causes:
+>
+> - **Enterprise token-lifetime policy.** The repo owner's enterprise can cap fine-grained token lifetimes. The **Microsoft Open Source** enterprise forbids fine-grained tokens whose lifetime is **greater than 8 days** and returns `403` on every call (the body names the enterprise and links to your token's settings). Regenerate the token with an **expiration of 7 days or less** (step 3 below).
+> - **Missing public-repo scope.** A fine-grained token cannot read a repository you do not own unless it is scoped with **Repository access → Public repositories (read-only)** (step 5 below). "Only select repositories" cannot include a repo you do not administer, so it yields no read access.
+>
+> Confirm the exact reason by reading the response body:
+>
+> ```bash
+> curl -sS -H "Authorization: ******" \
+>   -H "Accept: application/vnd.github+json" \
+>   https://api.github.com/repos/microsoft/agent-framework
+> ```
+
+### 1. Create the token in the GitHub portal
+
+1. Open <https://github.com/settings/personal-access-tokens/new>. This is **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+2. **Token name**: for example `foundry-ai-gateway-repo-digest`.
+3. **Expiration**: choose the shortest window that fits your rotation policy. If the repository owner belongs to an enterprise that caps fine-grained token lifetimes, you must stay within that cap or every API call returns `403`. The **Microsoft Open Source** enterprise (which owns `microsoft/agent-framework`) forbids fine-grained tokens with a lifetime greater than **8 days**, so pick **7 days** for that and other Microsoft-owned public repositories.
+4. **Resource owner**: select the account or organization that owns the repository being summarized. For a public repository you do not own, select your own account.
+5. **Repository access**:
+   - For a repository you own or administer, choose **Only select repositories** and pick that single repository.
+   - For a public repository you do not own, choose **Public repositories (read-only)**. This grants the read-only `pull` permission with no repository-permission selection required; skip to step 7.
+6. **Repository permissions** (only when you selected a specific repository) — set each of these to **Read-only** and leave everything else at **No access**:
+   - Metadata (required; auto-selected)
+   - Actions
+   - Contents
+   - Issues
+   - Pull requests
+7. Click **Generate token** and copy the `github_pat_...` value. You cannot view it again after leaving the page.
+
+Avoid repository write, administration, organization administration, workflow write, or classic `repo` scope.
+
+### 2. Apply the token from the command line
+
+Re-run provisioning with the fine-grained token exported as `GH_TOKEN`. The hook prefers `GH_TOKEN` over the account-wide GitHub CLI login and writes the tighter credential into the ToolServer.
+
+macOS or Linux (bash):
+
+```bash
+read -rsp "Fine-grained GitHub token: " GH_TOKEN && echo
+export GH_TOKEN
+azd provision
+```
+
+macOS (zsh — the default macOS shell). The `read` prompt syntax differs from bash: the prompt goes *inside* the variable spec as `VAR?prompt`, and `-p` must not be used (in zsh `-p` reads from a coprocess, so no prompt appears). Paste one line at a time so `read` does not consume the following lines as input:
+
+```zsh
+read -rs "GH_TOKEN?Fine-grained GitHub token: " && echo
+export GH_TOKEN
+azd provision
+```
+
+Shell-agnostic alternative (hidden entry, works in both bash and zsh):
+
+```bash
+export GH_TOKEN="$(python3 -c 'import getpass; print(getpass.getpass("Fine-grained GitHub token: "))')"
+azd provision
+```
+
+Windows (PowerShell 7):
+
+```powershell
+$GH_TOKEN = Read-Host -Prompt "Fine-grained GitHub token" -AsSecureString
+$env:GH_TOKEN = [System.Net.NetworkCredential]::new("", $GH_TOKEN).Password
+azd provision
+```
+
+`azd up` also works in place of `azd provision`. A GitHub App installation access token (`ghs_...`) is an equally accepted least-privilege credential.
+
+### 3. Confirm the warning is gone
+
+Re-running provisioning with the fine-grained token should print `Using the active GitHub CLI login for GitHub MCP.` with no credential warning. The advisory check runs inside the postprovision hook (`Assert-GitHubAccess` in `configure-ai-gateway.ps1`, `verify_github_access` in `configure-ai-gateway.sh`). GitHub does not return the complete selected-repository boundary or every granular write permission through the coarse repository role flags, so the advisory check cannot certify least privilege on its own; scoping the token in the portal as above is what enforces it.
+
 ## Tool middleware
 
 [`GitHubMcpMiddleware`](../agent/GitHubMcpMiddleware.cs) runs only for these source tool names:
 
-- `github_search_repositories`
 - `github_list_pull_requests`
-- `github_search_issues`
+- `github_list_issues`
 - `github_actions_list`
 
 Toolbox prefixes are removed by taking the text after the final `___`.
@@ -79,12 +155,11 @@ Before invocation, middleware forces bounded arguments:
 
 | Tool | Enforced arguments |
 | --- | --- |
-| Repository search | `minimal_output=true`, `perPage=1`, `page=1` |
 | Pull requests | `state=all`, `sort=updated`, `direction=desc`, `perPage=100`, `page=1` |
-| Issue search | `query=is:issue updated:>=<UTC cutoff>`, `sort=updated`, `order=desc`, `page=1` |
+| Issues (`list_issues`) | `orderBy=UPDATED_AT`, `direction=DESC`, `since=<UTC cutoff>`, `perPage=100` (no `query`, no `page`) |
 | Workflow runs | `method=list_workflow_runs`, `status=completed`, `per_page=100`, `page=1` |
 
-The cutoff is exactly 24 hours before function invocation. Pull requests are filtered locally by `updated_at`. Workflow results retain only failed runs updated or created since the cutoff.
+`list_issues` uses the core GitHub API (not the Search API), which avoids the Search API's stricter rate limits and the `403`/empty results it returns for public repositories the credential does not own. The cutoff is exactly 24 hours before function invocation. Pull requests and issues are filtered locally by `updated_at`. Workflow results retain only failed runs updated or created since the cutoff.
 
 The middleware removes large fields such as issue bodies, pull request bodies, commits, and workflow payloads. It keeps identifiers, titles, state, timestamps, URLs, labels, and actor information needed by the digest. Non-JSON tool errors and unexpected result shapes are returned unchanged.
 
@@ -172,9 +247,8 @@ The Docker image uses a .NET 10 SDK build stage and a .NET 10 ASP.NET runtime st
 `tests/FoundryHostedAgent.AIGateway.Tests/GitHubMcpMiddlewareTests.cs` covers:
 
 - argument normalization
-- repository field compaction
+- issue time filtering and field compaction
 - pull request time filtering
-- issue field compaction
 - failed workflow filtering
 - non-JSON error preservation
 

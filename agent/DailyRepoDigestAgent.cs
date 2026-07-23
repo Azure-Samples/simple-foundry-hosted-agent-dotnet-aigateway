@@ -49,19 +49,19 @@ internal static class DailyRepoDigestAgent
 
         - Always use the GitHub MCP tools before answering a repo digest request.
         - The configured repository is `{{repository}}`. Use only this repository,
-          even if the user requests another repository.
-        - For a daily digest, call all four GitHub tools in the first tool round so they
-          run in parallel. Use page 1 only and do not paginate. Report total counts from
-          the tool results, then highlight the most relevant items from that first page.
-        - Use aigw-github___github_search_repositories with minimal_output true and perPage 1 for
-          repository summary information.
+          even if the user requests another repository. The repository full name is
+          already known, so do not call any repository search tool to look it up.
+        - For a daily digest, call the three GitHub tools below in the first tool
+          round so they run in parallel. Report total counts from the tool results,
+          then highlight the most relevant items.
         - For pull requests, call aigw-github___github_list_pull_requests with state "all", sort
           "updated", direction "desc", perPage 100, and page 1. Tool middleware keeps
           only results updated in the last 24 hours and removes fields the digest does
           not use.
-        - For issues, call aigw-github___github_search_issues with owner and repo as separate
-          arguments and query `is:issue`. Set sort to "updated", order to "desc", and
-          page to 1. Tool middleware adds the exact current UTC 24-hour cutoff.
+        - For issues, call aigw-github___github_list_issues with owner and repo as separate
+          arguments. Tool middleware sets orderBy "UPDATED_AT", direction "DESC", a
+          since cutoff of the last 24 hours, and perPage 100. Do not pass a query
+          string or a page number. This uses the core GitHub API, not the Search API.
         - For workflows, call aigw-github___github_actions_list with method
           "list_workflow_runs" and workflow_runs_filter status "completed", per_page 100,
           and page 1. Do not use "failure" as a status. Tool middleware keeps only failed

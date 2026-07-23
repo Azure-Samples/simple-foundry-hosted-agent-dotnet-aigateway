@@ -7,9 +7,10 @@ LEGACY_AI_GATEWAY_API_VERSION="2026-05-01"
 FOUNDRY_USER_ROLE_ID="53ca6127-db72-4b80-b1b0-d745d6d5456d"
 DEFAULT_REPOSITORY="microsoft/agent-framework"
 GITHUB_MCP_SERVER="https://api.githubcopilot.com/mcp/"
-GITHUB_MCP_TOOLS="search_repositories,list_pull_requests,search_issues,actions_list"
+GITHUB_MCP_TOOLS="list_pull_requests,list_issues,actions_list"
 TOOLBOX_CONNECTION_NAME="aigw-github"
 TOOLBOX_NAME="repo-digest-tools"
+LEAST_PRIVILEGE_FIX_DOC="docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 azd_value() {
@@ -48,15 +49,28 @@ verify_github_access() {
     exit 1
   fi
 
+  # Advisory only: never block provisioning. Warn when the selected credential is
+  # broader than the recommended least-privilege token, so the documented
+  # 'gh auth status; azd up' flow keeps working while still nudging operators
+  # toward a fine-grained, repository-scoped, read-only token.
+  case "$token" in
+    github_pat_*|ghs_*) ;;
+    *)
+      echo "Warning: using a broad, account-wide GitHub credential (OAuth or classic token)." >&2
+      echo "It works, but the postprovision hook stores it in the cloud AI Gateway ToolServer." >&2
+      echo "For the least-privilege fix, see ${LEAST_PRIVILEGE_FIX_DOC}" >&2
+      return 0
+      ;;
+  esac
+
   for endpoint in \
     "repos/${repository}" \
     "repos/${repository}/pulls?per_page=1" \
     "repos/${repository}/issues?per_page=1" \
     "repos/${repository}/actions/runs?per_page=1"; do
     if ! GH_TOKEN="$token" gh api "$endpoint" --silent >/dev/null 2>&1; then
-      echo "The GitHub credential cannot read the required repository metadata at ${endpoint%%\?*}." >&2
-      echo "Use a repo-scoped credential with read access to metadata, pull requests, issues, and actions." >&2
-      exit 1
+      echo "Warning: could not verify read access at ${endpoint%%\?*}. Provisioning continues." >&2
+      echo "Prefer a repo-scoped, read-only credential; see ${LEAST_PRIVILEGE_FIX_DOC}" >&2
     fi
   done
 }
