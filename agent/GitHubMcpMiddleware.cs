@@ -10,9 +10,8 @@ internal static class GitHubMcpMiddleware
     private static readonly HashSet<string> GitHubMcpTools =
     [
         "github_actions_list",
-        "github_list_pull_requests",
-        "github_search_issues",
-        "github_search_repositories"
+        "github_list_issues",
+        "github_list_pull_requests"
     ];
 
     private static readonly JsonSerializerOptions CompactJsonOptions = new(JsonSerializerDefaults.Web);
@@ -53,20 +52,11 @@ internal static class GitHubMcpMiddleware
         var separator = repository.IndexOf('/');
         var owner = repository[..separator];
         var name = repository[(separator + 1)..];
-        if (toolName != "github_search_repositories")
-        {
-            arguments["owner"] = owner;
-            arguments["repo"] = name;
-        }
+        arguments["owner"] = owner;
+        arguments["repo"] = name;
 
         switch (toolName)
         {
-            case "github_search_repositories":
-                arguments["query"] = repository;
-                arguments["minimal_output"] = true;
-                arguments["perPage"] = 1;
-                arguments["page"] = 1;
-                break;
             case "github_list_pull_requests":
                 arguments["state"] = "all";
                 arguments["sort"] = "updated";
@@ -74,11 +64,16 @@ internal static class GitHubMcpMiddleware
                 arguments["perPage"] = 100;
                 arguments["page"] = 1;
                 break;
-            case "github_search_issues":
-                arguments["query"] = $"is:issue updated:>={cutoff.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}";
-                arguments["sort"] = "updated";
-                arguments["order"] = "desc";
-                arguments["page"] = 1;
+            case "github_list_issues":
+                // list_issues uses the core GitHub API (not the Search API) and
+                // paginates with an `after` cursor, so it accepts neither `page`
+                // nor a query string.
+                arguments.Remove("page");
+                arguments.Remove("query");
+                arguments["orderBy"] = "UPDATED_AT";
+                arguments["direction"] = "DESC";
+                arguments["since"] = $"{cutoff.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}";
+                arguments["perPage"] = 100;
                 break;
             case "github_actions_list":
                 arguments.TryGetValue("workflow_runs_filter", out var workflowRunsFilter);
@@ -98,11 +93,8 @@ internal static class GitHubMcpMiddleware
         DateTimeOffset cutoff) =>
         toolName switch
         {
-            "github_search_repositories" => CompactSearch(
-                payload,
-                CompactRepository),
             "github_list_pull_requests" => CompactPullRequests(payload, cutoff),
-            "github_search_issues" => CompactSearch(payload, CompactIssue),
+            "github_list_issues" => CompactIssues(payload, cutoff),
             "github_actions_list" => CompactWorkflowRuns(payload, cutoff),
             _ => throw new ArgumentOutOfRangeException(nameof(toolName), toolName, "Unsupported GitHub MCP tool.")
         };
@@ -155,18 +147,19 @@ internal static class GitHubMcpMiddleware
         return JsonSerializer.Deserialize<JsonElement>(compact);
     }
 
-    private static JsonObject CompactSearch(
-        JsonNode payload,
-        Func<JsonObject, JsonObject> compactItem)
+    private static JsonObject CompactIssues(JsonNode payload, DateTimeOffset cutoff)
     {
         var root = RequireObject(payload, "root");
-        var items = RequireObjectArray(root["items"], "items");
+        var recent = RequireObjectArray(root["issues"], "issues")
+            .Where(item => IsRecent(item["updated_at"], cutoff))
+            .Select(CompactIssue)
+            .ToArray();
 
         return new JsonObject
         {
-            ["total_count"] = root["total_count"]?.DeepClone(),
-            ["incomplete_results"] = root["incomplete_results"]?.DeepClone(),
-            ["items"] = new JsonArray(items.Select(item => compactItem(item)).ToArray())
+            ["total_count"] = root["totalCount"]?.DeepClone(),
+            ["returned_count"] = recent.Length,
+            ["issues"] = new JsonArray(recent)
         };
     }
 
@@ -200,20 +193,6 @@ internal static class GitHubMcpMiddleware
             ["workflow_runs"] = new JsonArray(items)
         };
     }
-
-    private static JsonObject CompactRepository(JsonObject item) =>
-        SelectFields(
-            item,
-            "full_name",
-            "description",
-            "html_url",
-            "language",
-            "stargazers_count",
-            "forks_count",
-            "open_issues_count",
-            "updated_at",
-            "default_branch",
-            "archived");
 
     private static JsonObject CompactPullRequest(JsonObject item)
     {
@@ -296,11 +275,20 @@ internal static class GitHubMcpMiddleware
             return names;
         }
 
-        foreach (var label in labels.OfType<JsonObject>())
+        // The core list_issues API returns labels as an array of strings, while
+        // other endpoints return an array of objects with a `name` field.
+        foreach (var label in labels)
         {
-            if (label["name"]?.GetValue<string>() is { } name)
+            var name = label switch
             {
-                names.Add(name);
+                JsonValue text when text.TryGetValue(out string? labelText) => labelText,
+                JsonObject obj => obj["name"]?.GetValue<string>(),
+                _ => null
+            };
+
+            if (name is { } labelName)
+            {
+                names.Add(labelName);
             }
         }
 

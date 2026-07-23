@@ -12,9 +12,10 @@ $legacyApiVersion = "2026-05-01"
 $foundryUserRoleId = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
 $defaultRepository = "microsoft/agent-framework"
 $githubMcpServer = "https://api.githubcopilot.com/mcp/"
-$githubMcpTools = "search_repositories,list_pull_requests,search_issues,actions_list"
+$githubMcpTools = "list_pull_requests,list_issues,actions_list"
 $toolboxConnectionName = "aigw-github"
 $toolboxName = "repo-digest-tools"
+$leastPrivilegeFixDoc = "docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 
 function Get-AzdValue([string]$Name) {
@@ -92,6 +93,15 @@ function Assert-GitHubAccess([string]$Repository, [string]$Token) {
         throw "GITHUB_REPOSITORY must use the owner/repository format."
     }
 
+    # Advisory only: never block provisioning. Warn when the selected credential
+    # is broader than the recommended least-privilege token, so the documented
+    # 'gh auth status; azd up' flow keeps working while still nudging operators
+    # toward a fine-grained, repository-scoped, read-only token.
+    if ($Token -notmatch '^(github_pat_|ghs_)') {
+        Write-Warning "Using a broad, account-wide GitHub credential (OAuth or classic token). It works, but the postprovision hook stores it in the cloud AI Gateway ToolServer. For the least-privilege fix, see $leastPrivilegeFixDoc"
+        return
+    }
+
     $previousToken = $env:GH_TOKEN
     try {
         $env:GH_TOKEN = $Token
@@ -104,7 +114,7 @@ function Assert-GitHubAccess([string]$Repository, [string]$Token) {
             try {
                 gh api $endpoint --silent 2>$null
             } catch {
-                throw "The GitHub credential cannot read required repository metadata at $($endpoint.Split('?')[0]). Use a repo-scoped credential with read access to metadata, pull requests, issues, and actions."
+                Write-Warning "Could not verify read access at $($endpoint.Split('?')[0]). Provisioning continues. Prefer a repo-scoped, read-only credential; see $leastPrivilegeFixDoc"
             }
         }
     } finally {

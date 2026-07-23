@@ -24,7 +24,7 @@ azd up
 dotnet restore
 ```
 
-`azd up` uses your active `gh` login. You do not need to copy a GitHub token.
+`azd up` uses your active `gh` login. You do not need to copy a GitHub token. Any login works for a quick test; the hook only **warns** (never fails) if the credential is broader than recommended. **For production and safety, strongly prefer a read-only, repo-scoped fine-grained token** — your CLI login is account-wide and the hook stores the credential in the cloud AI Gateway ToolServer. See [Tighten the GitHub credential to least privilege](docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege), including the exact GitHub portal settings that fix a `403 Forbidden` / empty MCP results on a public repository you do not own (for example `microsoft/agent-framework`).
 
 If GitHub CLI is not signed in:
 
@@ -47,7 +47,7 @@ GITHUB_MCP_GH_USER="your-github-login" azd up
 
 ### GitHub credential permissions
 
-AI Gateway stores the selected GitHub credential in the ToolServer so it can call the four allowlisted GitHub MCP tools. For least privilege, use a dedicated fine-grained personal access token with:
+AI Gateway stores the selected GitHub credential in the ToolServer so it can call the three allowlisted GitHub MCP tools. For least privilege, use a dedicated fine-grained personal access token with:
 
 - Repository access limited to the repository configured by `GITHUB_REPOSITORY`.
 - Read-only repository permissions for Metadata, Actions, Issues, and Pull requests.
@@ -67,7 +67,7 @@ Remove-Item Env:GH_TOKEN
 GH_TOKEN="<fine-grained-token>" azd up
 ```
 
-The provisioning hook verifies read access to the configured repository, pull requests, issues, and workflow runs before updating the ToolServer. It never prints the token, removes legacy token values from the azd environment, configures `failureMode: failClosed`, sends `X-MCP-Readonly: true`, and restricts the ToolServer to `search_repositories`, `list_pull_requests`, `search_issues`, and `actions_list`. Agent middleware overwrites repository arguments on every tool call so callers cannot use the stored credential against another repository. These controls restrict how the sample uses the credential, but they cannot remove permissions already granted to the token.
+The provisioning hook runs an advisory (non-blocking) check of read access to the configured repository, pull requests, issues, and workflow runs before updating the ToolServer, warning rather than failing when the credential is broad or cannot read an endpoint. It never prints the token, removes legacy token values from the azd environment, configures `failureMode: failClosed`, sends `X-MCP-Readonly: true`, and restricts the ToolServer to `list_pull_requests`, `list_issues`, and `actions_list`. Agent middleware overwrites repository arguments on every tool call so callers cannot use the stored credential against another repository. These controls restrict how the sample uses the credential, but they cannot remove permissions already granted to the token. To tighten a broad login to a repo-scoped, read-only token, follow [Tighten the GitHub credential to least privilege](docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege).
 
 ## Use the Gateway from the GitHub Copilot app
 
