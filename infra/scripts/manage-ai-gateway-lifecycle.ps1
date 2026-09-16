@@ -14,7 +14,7 @@ if ([string]::IsNullOrWhiteSpace($Mode)) {
 }
 $aiGatewayApiVersion = "2025-09-01-preview"
 $deletedServiceApiVersion = "2024-05-01"
-$defaultLocation = "eastus2euap"
+$defaultLocation = "eastus2"
 $pollSeconds = [int]($env:APIM_LIFECYCLE_POLL_SECONDS ?? "10")
 $identitySettleSeconds = [int]($env:APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS ?? "180")
 $operationTimeoutSeconds = [int]($env:APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS ?? "900")

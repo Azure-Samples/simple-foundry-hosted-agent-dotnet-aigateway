@@ -19,7 +19,7 @@ if [ "${1:-}" = "env" ] && [ "${2:-}" = "get-value" ]; then
     AZURE_SUBSCRIPTION_ID) printf '00000000-0000-0000-0000-000000000001' ;;
     AI_GATEWAY_RESOURCE_GROUP) printf 'rg-testenv-abc12345-gateway' ;;
     AI_GATEWAY_NAME) printf 'aigw-abc12345' ;;
-    AI_GATEWAY_LOCATION) printf 'eastus2euap' ;;
+    AI_GATEWAY_LOCATION) printf 'eastus2' ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -42,7 +42,7 @@ if [ "${1:-}" = "account" ] && [ "${2:-}" = "show" ]; then
 fi
 
 if [ "${1:-}" = "resource" ] && [ "${2:-}" = "list" ]; then
-  printf 'aigw-abc12345\trg-testenv-abc12345-gateway\teastus2euap\n'
+  printf 'aigw-abc12345\trg-testenv-abc12345-gateway\teastus2\n'
   exit 0
 fi
 
