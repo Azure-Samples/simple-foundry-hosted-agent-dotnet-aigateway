@@ -13,8 +13,6 @@ if ([string]::IsNullOrWhiteSpace($Mode)) {
     throw "Usage: manage-ai-gateway-lifecycle.ps1 prepare|cleanup"
 }
 $aiGatewayApiVersion = "2025-09-01-preview"
-$deletedServiceApiVersion = "2024-05-01"
-$defaultLocation = "eastus2"
 $pollSeconds = [int]($env:APIM_LIFECYCLE_POLL_SECONDS ?? "10")
 $identitySettleSeconds = [int]($env:APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS ?? "180")
 $operationTimeoutSeconds = [int]($env:APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS ?? "900")
@@ -65,6 +63,86 @@ function Get-AzRestResult(
     throw "Azure REST GET failed for $Uri. $body"
 }
 
+function Find-FailedGateway {
+    $groupPattern = '^rg-' + [regex]::Escape($environmentName.ToLowerInvariant()) + '-([a-z0-9]{8})-gateway$'
+    $resourcePattern = '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.(ApiManagement/aigateways|Resources/deployments)/([^/]+)$'
+    $candidates = @{}
+    $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    function Find-InOperations($Operations, [int]$Depth) {
+        foreach ($operation in $Operations) {
+            $properties = $operation.properties
+            if ($properties.provisioningState -ne "Failed") {
+                continue
+            }
+            $target = $properties.targetResource
+            $match = [regex]::Match([string]$target.id, $resourcePattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if (-not $match.Success -or $match.Groups[1].Value -ne $subscriptionId) {
+                continue
+            }
+            $group = $match.Groups[2].Value
+            $resourceType = $match.Groups[3].Value
+            $name = $match.Groups[4].Value
+            $groupMatch = [regex]::Match($group, $groupPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if (-not [string]::IsNullOrWhiteSpace($resourceGroup)) {
+                if ($group -ne $resourceGroup) { continue }
+            } elseif (-not $groupMatch.Success) {
+                continue
+            }
+
+            if ($target.resourceType -eq "microsoft.resources/deployments" -and $resourceType -eq "Resources/deployments") {
+                if (-not $visited.Contains($target.id)) {
+                    if ($Depth -ge 3 -or $visited.Count -ge 30) {
+                        throw "Failed deployment discovery exceeded its safe traversal limit."
+                    }
+                    $null = $visited.Add($target.id)
+                    $nested = az deployment operation group list `
+                        --subscription $subscriptionId `
+                        --resource-group $group `
+                        --name $name `
+                        -o json | ConvertFrom-Json
+                    Find-InOperations $nested ($Depth + 1)
+                }
+            } elseif ($target.resourceType -eq "microsoft.apimanagement/aigateways" -and $resourceType -eq "ApiManagement/aigateways") {
+                $status = $properties.statusMessage | ConvertTo-Json -Depth 50 -Compress
+                if ($status -notmatch '\b(FailedIdentityOperation|ActivationFailed)\b') {
+                    continue
+                }
+                if (-not [string]::IsNullOrWhiteSpace($gatewayName)) {
+                    if ($name -ne $gatewayName) { continue }
+                } elseif (-not $groupMatch.Success -or $name -ne "aigw-$($groupMatch.Groups[1].Value)") {
+                    continue
+                }
+                $candidates[([string]$target.id).ToLowerInvariant()] = [pscustomobject]@{ name = $name; resourceGroup = $group }
+            }
+        }
+    }
+
+    $deployments = az deployment sub list `
+        --subscription $subscriptionId `
+        --query "reverse(sort_by([?properties.provisioningState=='Failed'], &properties.timestamp))[:10]" `
+        -o json | ConvertFrom-Json
+    foreach ($deployment in $deployments) {
+        if ($deployment.properties.provisioningState -eq "Failed") {
+            $operations = az deployment operation sub list `
+                --subscription $subscriptionId `
+                --name $deployment.name `
+                -o json | ConvertFrom-Json
+            Find-InOperations $operations 0
+        }
+    }
+    if ($candidates.Count -gt 1) {
+        throw "Multiple AI Gateways found in failed deployments; set AI_GATEWAY_NAME and AI_GATEWAY_RESOURCE_GROUP."
+    }
+    foreach ($candidate in $candidates.Values) {
+        $groupMetadata = az group show --subscription $subscriptionId --name $candidate.resourceGroup -o json | ConvertFrom-Json
+        if ($groupMetadata.tags.'azd-env-name' -ne $environmentName) {
+            throw "Refusing failed deployment resource group tagged for another or missing azd environment."
+        }
+        $candidate
+    }
+}
+
 $environmentName = Get-FirstValue @($env:AZURE_ENV_NAME, (Get-AzdValue "AZURE_ENV_NAME"))
 if ([string]::IsNullOrWhiteSpace($environmentName)) {
     throw "AZURE_ENV_NAME is required."
@@ -87,41 +165,37 @@ $gatewayName = Get-FirstValue @(
     $env:AI_GATEWAY_NAME,
     (Get-AzdValue "AI_GATEWAY_NAME")
 )
-$gatewayLocation = (Get-FirstValue @(
-    $env:AI_GATEWAY_LOCATION,
-    (Get-AzdValue "AI_GATEWAY_LOCATION"),
-    $defaultLocation
-)).Replace(" ", "").ToLowerInvariant()
 
 if ([string]::IsNullOrWhiteSpace($resourceGroup) -or [string]::IsNullOrWhiteSpace($gatewayName)) {
     $candidates = @(
         az resource list `
             --subscription $subscriptionId `
-            --resource-type Microsoft.ApiManagement/service `
-            --query "[?tags.`"azd-env-name`"=='$environmentName' && sku.name=='AIGateway'].{name:name,resourceGroup:resourceGroup,location:location}" `
+            --resource-type Microsoft.ApiManagement/aigateways `
+            --query "[?tags.`"azd-env-name`"=='$environmentName' && sku.name=='Consumption'].{name:name,resourceGroup:resourceGroup}" `
             -o json | ConvertFrom-Json
     )
     if ($candidates.Count -eq 0) {
-        Write-Host "No environment-owned AI Gateway requires lifecycle cleanup."
-        exit 0
+        $candidates = @(Find-FailedGateway)
+        if ($candidates.Count -eq 0) {
+            Write-Host "No environment-owned AI Gateway requires lifecycle cleanup."
+            exit 0
+        }
     }
     if ($candidates.Count -ne 1) {
-        throw "Multiple AIGateway services are tagged azd-env-name=$environmentName; set AI_GATEWAY_NAME and AI_GATEWAY_RESOURCE_GROUP."
+        throw "Multiple AI Gateways are tagged azd-env-name=$environmentName; set AI_GATEWAY_NAME and AI_GATEWAY_RESOURCE_GROUP."
     }
     $gatewayName = $candidates[0].name
     $resourceGroup = $candidates[0].resourceGroup
-    $gatewayLocation = ([string]$candidates[0].location).Replace(" ", "").ToLowerInvariant()
 }
 
-$resourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
+$resourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
 $resourceUri = "https://management.azure.com${resourceId}?api-version=$aiGatewayApiVersion"
-$deletedUri = "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.ApiManagement/locations/$gatewayLocation/deletedservices/${gatewayName}?api-version=$deletedServiceApiVersion"
 
 $liveResult = Get-AzRestResult $resourceUri
 $live = if ($liveResult.Found) { $liveResult.Body | ConvertFrom-Json } else { $null }
 
 if ($null -ne $live) {
-    if ($live.sku.name -ne "AIGateway") {
+    if ($live.sku.name -ne "Consumption") {
         throw "Refusing resource with SKU $($live.sku.name)."
     }
     if ($live.tags.'azd-env-name' -ne $environmentName) {
@@ -161,25 +235,12 @@ while ($true) {
         continue
     }
 
-    $deletedResult = Get-AzRestResult $deletedUri "properties.serviceId" "tsv"
-    $deletedServiceId = if ($deletedResult.Found) { $deletedResult.Body.Trim() } else { "" }
-    if (-not [string]::IsNullOrWhiteSpace($deletedServiceId)) {
-        $quietStartedAt = $null
-        if (-not $deletedServiceId.Equals($resourceId, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to purge soft-deleted AI Gateway because its serviceId does not match $resourceId."
-        }
-        Write-Host "Purging soft-deleted AI Gateway $gatewayName in $gatewayLocation."
-        az rest --method delete --uri $deletedUri -o none
-        Start-Sleep -Seconds $pollSeconds
-        continue
-    }
-
     if ($null -eq $quietStartedAt) {
         $quietStartedAt = $now
     }
     $quietElapsed = [int]($now - $quietStartedAt).TotalSeconds
     if ($quietElapsed -ge $identitySettleSeconds) {
-        Write-Host "AI Gateway deletion, soft-delete purge, and ${identitySettleSeconds}s identity settle window completed."
+        Write-Host "AI Gateway deletion and ${identitySettleSeconds}s identity settle window completed."
         exit 0
     }
 

@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 $aiGatewayApiVersion = "2025-09-01-preview"
-$legacyApiVersion = "2026-05-01"
+$legacyApiVersion = "2024-05-01"
 $foundryUserRoleId = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
 $defaultRepository = "microsoft/agent-framework"
 $githubMcpServer = "https://api.githubcopilot.com/mcp/"
@@ -184,13 +184,13 @@ function Prepare-BicepRbac {
         return
     }
 
-    $gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
-    $legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
+    $gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
+    $legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
     $gateway = Get-OptionalAzRestResource "https://management.azure.com${gatewayResourceId}?api-version=$aiGatewayApiVersion"
     if ($null -eq $gateway) {
         $legacy = Get-OptionalAzRestResource "https://management.azure.com${legacyResourceId}?api-version=$legacyApiVersion"
         if ($null -ne $legacy) {
-            throw "The environment uses the retired Microsoft.ApiManagement/aigateways resource. Use a fresh azd environment; Bicep will not create a canonical service alongside it."
+            throw "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment; Bicep will not create a standalone AI Gateway alongside it."
         }
         return
     }
@@ -300,22 +300,20 @@ $projectEndpoint = Require-Value "FOUNDRY_PROJECT_ENDPOINT" (Get-FirstValue @(
     (Get-AzdValue "FOUNDRY_PROJECT_ENDPOINT")
 ))
 
-$gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
-$legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
+$gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
+$legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
 $workspaceName = Get-FirstValue @($env:AI_GATEWAY_WORKSPACE_NAME, "default")
 $workspaceResourceId = "$gatewayResourceId/workspaces/$workspaceName"
 $gatewayUri = "https://management.azure.com${gatewayResourceId}?api-version=$aiGatewayApiVersion"
 
-try {
-    $gateway = az rest --method get --uri $gatewayUri -o json | ConvertFrom-Json
-} catch {
+$gateway = Get-OptionalAzRestResource $gatewayUri
+if ($null -eq $gateway) {
     $legacyUri = "https://management.azure.com${legacyResourceId}?api-version=$legacyApiVersion"
-    try {
-        az rest --method get --uri $legacyUri -o none 2>$null
-        throw "The environment uses the retired Microsoft.ApiManagement/aigateways resource. Use a fresh azd environment."
-    } catch {
-        throw "Bicep did not create the expected Microsoft.ApiManagement/service AI Gateway: $gatewayName"
+    $legacy = Get-OptionalAzRestResource $legacyUri
+    if ($null -ne $legacy) {
+        throw "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment."
     }
+    throw "Bicep did not create the expected Microsoft.ApiManagement/aigateways AI Gateway: $gatewayName"
 }
 
 if ($gateway.properties.provisioningState -ne "Succeeded") {
@@ -325,7 +323,12 @@ if ($gateway.identity.type -notin @("SystemAssigned", "SystemAssigned, UserAssig
     throw "Bicep did not enable the required AI Gateway system-assigned identity."
 }
 
-$gatewayUrl = Require-Value "AZURE_AI_GATEWAY_ENDPOINT" ([string]$gateway.properties.gatewayUrl)
+$gatewayHostname = [string]$gateway.properties.frontend.defaultHostname
+$gatewayUrl = if (-not [string]::IsNullOrWhiteSpace($gatewayHostname) -and $gatewayHostname -ne "null") {
+    "https://$(($gatewayHostname -creplace '^https?://', '').TrimEnd('/'))/"
+} else {
+    Require-Value "AZURE_AI_GATEWAY_ENDPOINT" ([string]$gateway.properties.gatewayUrl)
+}
 if (-not $gatewayUrl.EndsWith("/", [StringComparison]::Ordinal)) {
     $gatewayUrl += "/"
 }
