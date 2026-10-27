@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 AI_GATEWAY_API_VERSION="2025-09-01-preview"
-LEGACY_AI_GATEWAY_API_VERSION="2026-05-01"
+LEGACY_AI_GATEWAY_API_VERSION="2024-05-01"
 FOUNDRY_USER_ROLE_ID="53ca6127-db72-4b80-b1b0-d745d6d5456d"
 DEFAULT_REPOSITORY="microsoft/agent-framework"
 GITHUB_MCP_SERVER="https://api.githubcopilot.com/mcp/"
@@ -180,11 +180,11 @@ prepare_bicep_rbac() {
     return 0
   fi
 
-  gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/service/${gateway_name}"
-  legacy_gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/aigateways/${gateway_name}"
+  gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/aigateways/${gateway_name}"
+  legacy_gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/service/${gateway_name}"
   if ! az rest --method get --uri "https://management.azure.com${gateway_resource_id}?api-version=${AI_GATEWAY_API_VERSION}" -o none 2>/dev/null; then
     if az rest --method get --uri "https://management.azure.com${legacy_gateway_resource_id}?api-version=${LEGACY_AI_GATEWAY_API_VERSION}" -o none 2>/dev/null; then
-      echo "The environment uses the retired Microsoft.ApiManagement/aigateways resource. Use a fresh azd environment; Bicep will not create a canonical service alongside it." >&2
+      echo "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment; Bicep will not create a standalone AI Gateway alongside it." >&2
       exit 1
     fi
     return 0
@@ -262,17 +262,17 @@ gateway_mini_model="$(require_value AZURE_AI_GATEWAY_MINI_MODEL "$(first_value "
 github_repository="$(first_value "${GITHUB_REPOSITORY:-}" "$(azd_value GITHUB_REPOSITORY)" "$DEFAULT_REPOSITORY")"
 project_endpoint="$(require_value FOUNDRY_PROJECT_ENDPOINT "$(first_value "${FOUNDRY_PROJECT_ENDPOINT:-}" "$(azd_value FOUNDRY_PROJECT_ENDPOINT)")")"
 
-gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/service/${gateway_name}"
-legacy_gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/aigateways/${gateway_name}"
+gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/aigateways/${gateway_name}"
+legacy_gateway_resource_id="/subscriptions/${subscription_id}/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/service/${gateway_name}"
 workspace_name="${AI_GATEWAY_WORKSPACE_NAME:-default}"
 workspace_resource_id="${gateway_resource_id}/workspaces/${workspace_name}"
 gateway_uri="https://management.azure.com${gateway_resource_id}?api-version=${AI_GATEWAY_API_VERSION}"
 
 if ! az rest --method get --uri "$gateway_uri" -o none 2>/dev/null; then
   if az rest --method get --uri "https://management.azure.com${legacy_gateway_resource_id}?api-version=${LEGACY_AI_GATEWAY_API_VERSION}" -o none 2>/dev/null; then
-    echo "The environment uses the retired Microsoft.ApiManagement/aigateways resource. Use a fresh azd environment; this hook will not access hidden projected APIM resources." >&2
+    echo "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment; this hook will not access hidden projected APIM resources." >&2
   else
-    echo "Bicep did not create the expected Microsoft.ApiManagement/service AI Gateway: ${gateway_name}" >&2
+    echo "Bicep did not create the expected Microsoft.ApiManagement/aigateways AI Gateway: ${gateway_name}" >&2
   fi
   exit 1
 fi
@@ -292,7 +292,14 @@ case "$identity_type" in
     ;;
 esac
 
-gateway_url="$(require_value AZURE_AI_GATEWAY_ENDPOINT "$(az rest --method get --uri "$gateway_uri" --query properties.gatewayUrl -o tsv)")"
+gateway_hostname="$(az rest --method get --uri "$gateway_uri" --query properties.frontend.defaultHostname -o tsv)"
+if [ -n "$gateway_hostname" ] && [ "$gateway_hostname" != "null" ]; then
+  gateway_hostname="${gateway_hostname#https://}"
+  gateway_hostname="${gateway_hostname#http://}"
+  gateway_url="https://${gateway_hostname%/}/"
+else
+  gateway_url="$(require_value AZURE_AI_GATEWAY_ENDPOINT "$(az rest --method get --uri "$gateway_uri" --query properties.gatewayUrl -o tsv)")"
+fi
 case "$gateway_url" in
   */) ;;
   *) gateway_url="${gateway_url}/" ;;

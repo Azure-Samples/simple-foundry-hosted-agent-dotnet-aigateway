@@ -141,7 +141,7 @@ azd up
 azd ai agent invoke "Create a concise daily repo digest for microsoft/agent-framework."
 ```
 
-If Azure leaves a failed AI Gateway after an activation or managed identity conflict, rerun `azd up`. The preprovision hook deletes only the terminal `Failed` AIGateway tagged for the current azd environment, purges its APIM soft-delete record, and waits for identity cleanup. `azd down` performs the same bounded purge and settle process in its postdown hook.
+If Azure leaves a failed AI Gateway after an activation or managed identity conflict, rerun `azd up`. The preprovision hook preserves healthy gateways and validates environment ownership before cleanup. When gateway outputs are incomplete and live discovery finds nothing, a bounded search of recent failed subscription and nested resource-group deployments can recover the gateway identity from matching activation or identity errors. Nonterminal live gateways still fail closed. Cleanup waits for deletion and managed identity settling without purging legacy APIM `deletedservices` records. `azd down` uses the same bounded cleanup and settle process.
 
 Run the scheduled digest immediately:
 
@@ -165,5 +165,9 @@ Start with [`agent/DailyRepoDigestAgent.cs`](agent/DailyRepoDigestAgent.cs). It 
 [`agent/GitHubMcpMiddleware.cs`](agent/GitHubMcpMiddleware.cs) normalizes GitHub tool arguments before invocation and compacts results after invocation. [`agent/Program.cs`](agent/Program.cs) is the minimal API host.
 
 The OpenAI SDK requires a credential, but AI Gateway authenticates model requests with an `Api-Key` header. `DailyRepoDigestAgent` uses the built-in `ApiKeyAuthenticationPolicy` to add that header without creating a separate application concern.
+
+Infrastructure uses standalone `Microsoft.ApiManagement/aigateways@2025-09-01-preview` with the `Consumption` SKU. The default `gpt-latest` alias routes through `primary-router`: `gpt-6.1-sol` -> `gpt-6-sol` -> `gpt-5.4-mini` (deployment names `gpt-6-1-sol`, `gpt-6-sol`, and `gpt-5-4-mini`). The `gpt-mini-latest` alias uses `mini-router` to select the mini deployment directly.
+
+See [`infra/README.md`](infra/README.md) for deployment modules, model defaults, and hook responsibilities.
 
 See [`docs/implementation-notes.md`](docs/implementation-notes.md) for architecture, authentication, AI Gateway contracts, security boundaries, configuration, monitoring, and deployment details.
