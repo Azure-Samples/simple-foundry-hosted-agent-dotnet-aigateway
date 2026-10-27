@@ -30,7 +30,7 @@ param location string
   'swedencentral'
   'eastus2'
 ])
-@description('Azure region for the release-gated Microsoft.ApiManagement/service AIGateway resource.')
+@description('Azure region for the release-gated Microsoft.ApiManagement/aigateways resource.')
 param aiGatewayLocation string = 'eastus2'
 
 @description('Optional Microsoft Entra user object ID for development access.')
@@ -91,7 +91,7 @@ param miniModelName string = 'gpt-5.4-mini'
 param miniModelVersion string = '2026-03-17'
 
 @description('ARM-safe deployment and Gateway catalog name for the mini model.')
-param miniModelDeploymentName string = 'gpt-mini-latest'
+param miniModelDeploymentName string = 'gpt-5-4-mini'
 
 @description('Model format for the Foundry deployment.')
 param modelFormat string = 'OpenAI'
@@ -106,13 +106,54 @@ param modelCapacity int = 20
 param miniModelCapacity int = 200
 
 @description('ARM-safe deployment and Gateway catalog name for the full model.')
-param modelDeploymentName string = 'gpt-latest'
+param modelDeploymentName string = 'gpt-6-1-sol'
 
-@description('Backing Foundry model name for the full deployment. Use gpt-5.5 only when gpt-5.6-sol is unavailable.')
-param modelName string = 'gpt-5.6-sol'
+@description('Backing Foundry model name for the primary deployment.')
+param modelName string = 'gpt-6.1-sol'
 
 @description('Foundry version for the full model deployment.')
-param modelVersion string = '2026-07-09'
+param modelVersion string = '2026-09-29'
+
+@description('Backing Foundry model name for the secondary failover deployment.')
+param secondaryModelName string = 'gpt-6-sol'
+
+@description('Foundry version for the secondary model deployment.')
+param secondaryModelVersion string = '2026-09-22'
+
+@description('ARM-safe deployment and Gateway catalog name for the secondary model.')
+param secondaryModelDeploymentName string = 'gpt-6-sol'
+
+@description('Global Standard capacity assigned to the secondary model deployment.')
+param secondaryModelCapacity int = 20
+
+@description('Public AI Gateway alias for primary, secondary, and mini failover routing.')
+param modelAliasName string = 'gpt-latest'
+
+@description('Public AI Gateway alias for direct mini model routing.')
+param miniModelAliasName string = 'gpt-mini-latest'
+
+@description('Optional primary alias backends with modelArmName, priority (0-100), and weight (1-100). Defaults to primary, secondary, then mini.')
+param modelAliasBackends array = []
+
+var effectiveModelAliasBackends = empty(modelAliasBackends)
+  ? [
+      {
+        modelArmName: modelDeploymentName
+        priority: 0
+        weight: 100
+      }
+      {
+        modelArmName: secondaryModelDeploymentName
+        priority: 1
+        weight: 100
+      }
+      {
+        modelArmName: miniModelDeploymentName
+        priority: 2
+        weight: 100
+      }
+    ]
+  : modelAliasBackends
 
 var resourceToken = take(toLower(uniqueString(subscription().id, environmentName, location)), 8)
 var environmentLabel = toLower(environmentName)
@@ -148,6 +189,15 @@ var gatewayModelDeployments = [
     skuName: modelSkuName
     capacity: modelCapacity
     description: 'Gateway registration for the latest supported full GPT model.'
+  }
+  {
+    deploymentName: secondaryModelDeploymentName
+    modelName: secondaryModelName
+    modelFormat: modelFormat
+    modelVersion: secondaryModelVersion
+    skuName: modelSkuName
+    capacity: secondaryModelCapacity
+    description: 'Gateway registration for the secondary failover GPT model.'
   }
 ]
 
@@ -225,13 +275,32 @@ module aiGateway './ai-gateway/main.bicep' = {
       resourceId: foundryModels.outputs.modelDeploymentIds[i]
       modelName: deployment.modelName
       modelVersion: deployment.modelVersion
-      tokenLimit: deployment.capacity * 1000
       apiFormat: 'OpenAIChatCompletions'
       supportedEndpoints: [
         '/openai/v1/chat/completions'
         '/openai/v1/responses'
       ]
     }]
+    modelAliasesConfig: [
+      {
+        armName: 'primary-router'
+        aliasName: modelAliasName
+        description: 'Primary model routing with secondary and mini failover.'
+        backendModels: effectiveModelAliasBackends
+      }
+      {
+        armName: 'mini-router'
+        aliasName: miniModelAliasName
+        description: 'Direct mini model routing.'
+        backendModels: [
+          {
+            modelArmName: miniModelDeploymentName
+            priority: 0
+            weight: 100
+          }
+        ]
+      }
+    ]
   }
 }
 
@@ -271,5 +340,9 @@ output APPLICATION_INSIGHTS_NAME string = aiGateway.outputs.appInsightsName
 output LOG_ANALYTICS_WORKSPACE_ID string = aiGateway.outputs.logAnalyticsWorkspaceId
 output LOG_ANALYTICS_WORKSPACE_NAME string = aiGateway.outputs.logAnalyticsWorkspaceName
 output AZURE_AI_GATEWAY_ENDPOINT string = 'https://${aiGateway.outputs.runtimeHostname}/'
-output AZURE_AI_GATEWAY_MODEL string = modelDeploymentName
-output AZURE_AI_GATEWAY_MINI_MODEL string = miniModelDeploymentName
+output AZURE_AI_GATEWAY_MODEL string = modelAliasName
+output AZURE_AI_GATEWAY_MINI_MODEL string = miniModelAliasName
+output AZURE_AI_GATEWAY_MODEL_ALIAS_IDS array = aiGateway.outputs.modelAliasIds
+output AI_GATEWAY_INTERNAL_SECONDARY_MODEL_DEPLOYMENT string = secondaryModelDeploymentName
+output AI_GATEWAY_INTERNAL_SECONDARY_MODEL_NAME string = secondaryModelName
+output AI_GATEWAY_INTERNAL_SECONDARY_MODEL_VERSION string = secondaryModelVersion

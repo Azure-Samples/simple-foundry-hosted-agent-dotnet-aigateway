@@ -8,8 +8,6 @@ param enableMonitoring bool = false
 param deployApimGatewayViaBicep bool = true
 param appInsightsName string = '${gatewayName}-insights'
 param logAnalyticsWorkspaceName string = take('${gatewayName}-logs', 63)
-param publisherEmail string = 'noreply@example.com'
-param publisherName string = 'AI Gateway'
 param deployFoundryProvider bool = false
 param foundryProviderName string = 'foundry'
 param foundryProviderDisplayName string = 'Foundry'
@@ -18,6 +16,7 @@ param foundryEndpoint string = ''
 param foundryResourceIds array = []
 param foundryManagedIdentityResource string = 'https://cognitiveservices.azure.com/'
 param foundryModels array = []
+param modelAliasesConfig array = []
 @secure()
 param toolServerConfigs object = {}
 
@@ -28,7 +27,8 @@ var logAnalyticsApiVersion = '2023-09-01'
 var telemetryWorkspaceName = 'default'
 var telemetryExporterName = 'appinsights'
 var normalizedFoundryEndpoint = endsWith(foundryEndpoint, '/') ? foundryEndpoint : '${foundryEndpoint}/'
-resource aiGateway 'Microsoft.ApiManagement/service@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
   name: gatewayName
   location: gatewayLocation
   tags: tags
@@ -36,13 +36,9 @@ resource aiGateway 'Microsoft.ApiManagement/service@2025-09-01-preview' = if (de
     type: 'SystemAssigned'
   }
   sku: {
-    name: 'AIGateway'
-    capacity: 1
+    name: 'Consumption'
   }
-  properties: {
-    publisherEmail: publisherEmail
-    publisherName: publisherName
-  }
+  properties: {}
 }
 
 resource connectorNamespace 'Microsoft.Web/connectorGateways@2026-05-01-preview' = if (deployApimGatewayViaBicep) {
@@ -54,7 +50,8 @@ resource connectorNamespace 'Microsoft.Web/connectorGateways@2026-05-01-preview'
   ]
 }
 
-resource defaultWorkspace 'Microsoft.ApiManagement/service/workspaces@2025-09-01-preview' existing = if (deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource defaultWorkspace 'Microsoft.ApiManagement/aigateways/workspaces@2025-09-01-preview' existing = if (deployApimGatewayViaBicep) {
   parent: aiGateway
   name: telemetryWorkspaceName
 }
@@ -95,7 +92,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableMoni
   }
 }
 
-resource telemetryExporter 'Microsoft.ApiManagement/service/workspaces/telemetryExporters@2025-09-01-preview' = if (enableMonitoring && deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource telemetryExporter 'Microsoft.ApiManagement/aigateways/workspaces/telemetryExporters@2025-09-01-preview' = if (enableMonitoring && deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: telemetryExporterName
   properties: {
@@ -108,7 +106,8 @@ resource telemetryExporter 'Microsoft.ApiManagement/service/workspaces/telemetry
   }
 }
 
-resource foundryProvider 'Microsoft.ApiManagement/service/workspaces/modelProviders@2025-09-01-preview' = if (deployFoundryProvider && deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource foundryProvider 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders@2025-09-01-preview' = if (deployFoundryProvider && deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: foundryProviderName
   dependsOn: [
@@ -131,7 +130,8 @@ resource foundryProvider 'Microsoft.ApiManagement/service/workspaces/modelProvid
   }
 }
 
-resource foundryCatalogModels 'Microsoft.ApiManagement/service/workspaces/modelProviders/models@2025-09-01-preview' = [for model in foundryModels: if (deployFoundryProvider && deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders/models@2025-09-01-preview' = [for model in foundryModels: if (deployFoundryProvider && deployApimGatewayViaBicep) {
   parent: foundryProvider
   name: model.armName
   properties: {
@@ -144,24 +144,42 @@ resource foundryCatalogModels 'Microsoft.ApiManagement/service/workspaces/modelP
       modelName: last(split(model.resourceId, '/'))
       modelVersion: model.?modelVersion ?? null
     }
-    policies: model.?policies ?? [
-      {
-        type: 'tokenLimit'
-        period: 'minute'
-        count: model.?tokenLimit ?? 10000
-        counterKey: 'Identity'
-      }
-    ]
   }
 }]
 
-resource toolServers 'Microsoft.ApiManagement/service/workspaces/toolServers@2025-09-01-preview' = [for config in items(toolServerConfigs): if (deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource modelAliases 'Microsoft.ApiManagement/aigateways/workspaces/aliases@2025-09-01-preview' = [for alias in modelAliasesConfig: if (deployFoundryProvider && deployApimGatewayViaBicep) {
+  parent: defaultWorkspace
+  name: alias.armName
+  dependsOn: [
+    foundryCatalogModels
+  ]
+  properties: {
+    aliasName: alias.aliasName
+    description: alias.?description ?? null
+    backendModels: [for target in alias.backendModels: {
+      resourceId: resourceId(
+        'Microsoft.ApiManagement/aigateways/workspaces/modelProviders/models',
+        gatewayName,
+        telemetryWorkspaceName,
+        foundryProviderName,
+        target.modelArmName
+      )
+      priority: target.priority
+      weight: target.weight
+    }]
+  }
+}]
+
+#disable-next-line BCP081
+resource toolServers 'Microsoft.ApiManagement/aigateways/workspaces/toolServers@2025-09-01-preview' = [for config in items(toolServerConfigs): if (deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: config.key
   properties: config.value
 }]
 
-resource runtimeApiKey 'Microsoft.ApiManagement/service/apiKeys@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
+#disable-next-line BCP081
+resource runtimeApiKey 'Microsoft.ApiManagement/aigateways/apiKeys@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
   parent: aiGateway
   name: 'default'
   properties: {
@@ -169,14 +187,16 @@ resource runtimeApiKey 'Microsoft.ApiManagement/service/apiKeys@2025-09-01-previ
   }
 }
 
-output apimGatewayId string = resourceId('Microsoft.ApiManagement/service', gatewayName)
+output apimGatewayId string = resourceId('Microsoft.ApiManagement/aigateways', gatewayName)
 output connectorNamespaceId string = deployApimGatewayViaBicep ? connectorNamespace.id : ''
 output appInsightsId string = enableMonitoring ? appInsights.id : ''
 output appInsightsName string = enableMonitoring ? appInsights.name : ''
 output logAnalyticsWorkspaceId string = enableMonitoring ? logAnalyticsWorkspace.id : ''
 output logAnalyticsWorkspaceName string = enableMonitoring ? logAnalyticsWorkspace.name : ''
 output telemetryExporterId string = enableMonitoring && deployApimGatewayViaBicep ? telemetryExporter.id : ''
-output runtimeHostname string = deployApimGatewayViaBicep ? replace(aiGateway!.properties.gatewayUrl, 'https://', '') : ''
+output runtimeHostname string = deployApimGatewayViaBicep ? (empty(aiGateway!.properties.?frontend.?defaultHostname ?? '') ? replace(aiGateway!.properties.?gatewayUrl ?? '', 'https://', '') : aiGateway!.properties.frontend.defaultHostname) : ''
+output modelAliasIds array = [for (alias, i) in modelAliasesConfig: deployFoundryProvider && deployApimGatewayViaBicep ? modelAliases[i]!.id : '']
+output defaultModelAliasName string = !empty(modelAliasesConfig) ? modelAliasesConfig[0].aliasName : ''
 output runtimeApiKeyId string = deployApimGatewayViaBicep ? runtimeApiKey.id : ''
 output gatewayPrincipalId string = deployApimGatewayViaBicep ? aiGateway!.identity.principalId : ''
 output foundryUserRoleAssignmentName string = deployFoundryProvider && deployApimGatewayViaBicep && !empty(foundryResourceIds) ? foundryUserRoleAssignments[0]!.outputs.roleAssignmentName : ''
