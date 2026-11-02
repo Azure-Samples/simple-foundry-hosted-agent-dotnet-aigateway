@@ -261,6 +261,16 @@ if ! jq -e '
   exit 1
 fi
 
+if ! jq -e '
+  .parameters.backendSubnetResourceId.defaultValue == ""
+  and .parameters.allowedCallerCidrRanges.defaultValue == []
+  and (.variables.optionalIpFilterPolicies | tostring | contains("ipFilter") and contains("allowedCallerCidrRanges"))
+  and (.resources[] | select(.type == "Microsoft.ApiManagement/aigateways") | .properties | tostring | contains("backend") and contains("subnet") and contains("backendSubnetResourceId"))
+' "$compiled_template" >/dev/null; then
+  echo "AI Gateway module must expose optional backendSubnetResourceId (properties.backend.subnet.id) and allowedCallerCidrRanges (ipFilter policy)." >&2
+  exit 1
+fi
+
 for hook in "$repo_root/infra/scripts/configure-ai-gateway.sh" "$repo_root/infra/scripts/configure-ai-gateway.ps1"; do
   if grep -Eq 'azd[[:space:]]+ai[[:space:]]+connection[[:space:]]+create|--custom-key' "$hook"; then
     echo "Postprovision must not create the Bicep-owned connection or pass its key to a connection command." >&2

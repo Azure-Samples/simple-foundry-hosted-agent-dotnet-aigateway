@@ -25,10 +25,13 @@ of deployment capacity (20,000 for `gpt-latest` and `gpt-6-sol`; 200,000 for
 `gpt-mini-latest`), a `$10.00/month` `costLimit` per caller identity
 (`monthly-caller-budget`), and `Medium` `contentSafety` thresholds for Hate,
 Self-Harm, Sexual, and Violence. The same content-safety thresholds are applied
-to the `toolServers/github` MCP server. The `gpt-latest` alias fails over across
-`gpt-6.1-sol` (priority 0), `gpt-6-sol` (priority 1), and `gpt-5.4-mini`
-(priority 2). See the [AI Gateway module README](ai-gateway/README.md) for
-module usage and configuration.
+to the `toolServers/github` MCP server. You can also pass optional
+`backendSubnetResourceId` (`properties.backend.subnet.id`, delegated to
+`Microsoft.App/environments`) for outbound VNet integration and
+`allowedCallerCidrRanges` for inbound caller IP filtering (`ipFilter`). The
+`gpt-latest` alias fails over across `gpt-6.1-sol` (priority 0), `gpt-6-sol`
+(priority 1), and `gpt-5.4-mini` (priority 2). See the [AI Gateway module
+README](ai-gateway/README.md) for module usage and configuration.
 
 ## Deploy the full stack
 

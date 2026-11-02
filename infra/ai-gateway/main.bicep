@@ -25,6 +25,10 @@ param foundryAgentsProjectPrincipalId string = ''
 param principalId string = ''
 param useManagedIdentityForFoundryConnections bool = true
 param aiGatewayAudience string = 'https://azure-api.net/aigateway'
+@description('Optional resource ID of an existing subnet in the same subscription and region, delegated to Microsoft.App/environments, for outbound VNet integration.')
+param backendSubnetResourceId string = ''
+@description('Optional CIDR ranges allowed to call registered models via an inline ipFilter policy. Leave empty to allow all caller IPs.')
+param allowedCallerCidrRanges array = []
 @secure()
 param toolServerConfigs object = {}
 
@@ -34,6 +38,15 @@ var logAnalyticsApiVersion = '2023-09-01'
 var telemetryWorkspaceName = 'default'
 var aiGatewayUserRoleDefinitionId = 'caad7a21-134e-43f4-a550-c5ffc17e051c'
 var normalizedFoundryEndpoint = endsWith(foundryEndpoint, '/') ? foundryEndpoint : '${foundryEndpoint}/'
+var optionalIpFilterPolicies = empty(allowedCallerCidrRanges)
+  ? []
+  : [
+      {
+        type: 'ipFilter'
+        action: 'Allow'
+        cidrRanges: allowedCallerCidrRanges
+      }
+    ]
 #disable-next-line BCP081
 resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
   name: gatewayName
@@ -45,7 +58,15 @@ resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if 
   sku: {
     name: 'Premium'
   }
-  properties: {}
+  properties: empty(backendSubnetResourceId)
+    ? {}
+    : {
+        backend: {
+          subnet: {
+            id: backendSubnetResourceId
+          }
+        }
+      }
 }
 
 #disable-next-line BCP081
@@ -130,32 +151,35 @@ resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/mod
       modelName: last(split(model.resourceId, '/'))
       modelVersion: model.?modelVersion ?? null
     }
-    policies: model.?policies ?? [
-      {
-        type: 'tokenLimit'
-        period: 'minute'
-        count: model.?tokenLimit ?? 10000
-        counterKey: [
-          'identity'
-        ]
-      }
-      {
-        id: 'monthly-caller-budget'
-        type: 'costLimit'
-        period: 'month'
-        amount: model.?costLimit ?? 10
-        counterKey: [
-          'identity'
-        ]
-      }
-      {
-        type: 'contentSafety'
-        hateSeverity: model.?contentSafetySeverity ?? 'Medium'
-        selfHarmSeverity: model.?contentSafetySeverity ?? 'Medium'
-        sexualSeverity: model.?contentSafetySeverity ?? 'Medium'
-        violenceSeverity: model.?contentSafetySeverity ?? 'Medium'
-      }
-    ]
+    policies: model.?policies ?? concat(
+      [
+        {
+          type: 'tokenLimit'
+          period: 'minute'
+          count: model.?tokenLimit ?? 10000
+          counterKey: [
+            'identity'
+          ]
+        }
+        {
+          id: 'monthly-caller-budget'
+          type: 'costLimit'
+          period: 'month'
+          amount: model.?costLimit ?? 10
+          counterKey: [
+            'identity'
+          ]
+        }
+        {
+          type: 'contentSafety'
+          hateSeverity: model.?contentSafetySeverity ?? 'Medium'
+          selfHarmSeverity: model.?contentSafetySeverity ?? 'Medium'
+          sexualSeverity: model.?contentSafetySeverity ?? 'Medium'
+          violenceSeverity: model.?contentSafetySeverity ?? 'Medium'
+        }
+      ],
+      optionalIpFilterPolicies
+    )
   }
 }]
 

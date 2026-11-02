@@ -29,8 +29,13 @@ deployment capacity per minute. With the sample capacities, `gpt-latest` and
 identity (`id: monthly-caller-budget`) and `Medium` `contentSafety` thresholds
 for Hate, Self-Harm, Sexual, and Violence. The postprovision configuration adds
 the same `Medium` content-safety thresholds to the `toolServers/github` MCP
-server. The `gpt-latest` alias routes through `gpt-6.1-sol` (priority 0),
-`gpt-6-sol` (priority 1), and `gpt-5.4-mini` (priority 2).
+server. You can optionally pass `allowedCallerCidrRanges` (for example
+`['10.0.0.0/8']`) to add an inline `ipFilter` policy (`action: Allow`) to each
+model registration, and `backendSubnetResourceId` (pointing to a subnet in the
+same subscription and region delegated to `Microsoft.App/environments`) to
+enable outbound VNet integration (`properties.backend.subnet.id`). The
+`gpt-latest` alias routes through `gpt-6.1-sol` (priority 0), `gpt-6-sol`
+(priority 1), and `gpt-5.4-mini` (priority 2).
 
 ## Gateway without a Foundry provider
 

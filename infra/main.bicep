@@ -84,6 +84,12 @@ param agentLogAnalyticsWorkspaceName string = ''
 @description('AI Gateway resource name. Defaults to a deterministic name.')
 param aiGatewayName string = ''
 
+@description('Optional resource ID of an existing subnet in the same subscription and region, delegated to Microsoft.App/environments, for AI Gateway outbound VNet integration.')
+param backendSubnetResourceId string = ''
+
+@description('Optional CIDR ranges allowed to call registered models and MCP tool servers via an inline ipFilter policy. Leave empty to allow all caller IPs.')
+param allowedCallerCidrRanges array = []
+
 @description('Default GitHub repository for the daily digest automation.')
 param githubRepository string = 'microsoft/agent-framework'
 
@@ -272,6 +278,8 @@ module aiGateway './ai-gateway/main.bicep' = {
     foundryAgentsAccountPrincipalId: foundryAgents.outputs.aiServicesPrincipalId
     foundryAgentsProjectPrincipalId: foundryAgents.outputs.aiProjectPrincipalId
     principalId: principalId
+    backendSubnetResourceId: backendSubnetResourceId
+    allowedCallerCidrRanges: allowedCallerCidrRanges
     tags: tags
     enableMonitoring: enableMonitoring
     deployApimGatewayViaBicep: true
@@ -326,15 +334,26 @@ module aiGateway './ai-gateway/main.bicep' = {
         description: 'Read-only GitHub tools for repository digests.'
         type: 'mcp'
         failureMode: 'failClosed'
-        policies: [
-          {
-            type: 'contentSafety'
-            hateSeverity: 'Medium'
-            selfHarmSeverity: 'Medium'
-            sexualSeverity: 'Medium'
-            violenceSeverity: 'Medium'
-          }
-        ]
+        policies: concat(
+          [
+            {
+              type: 'contentSafety'
+              hateSeverity: 'Medium'
+              selfHarmSeverity: 'Medium'
+              sexualSeverity: 'Medium'
+              violenceSeverity: 'Medium'
+            }
+          ],
+          empty(allowedCallerCidrRanges)
+            ? []
+            : [
+                {
+                  type: 'ipFilter'
+                  action: 'Allow'
+                  cidrRanges: allowedCallerCidrRanges
+                }
+              ]
+        )
         endpoints: [
           {
             namespace: 'github'
