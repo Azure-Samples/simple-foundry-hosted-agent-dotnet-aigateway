@@ -429,5 +429,14 @@ done
 
 assert_contains "$repo_root/infra/scripts/configure-ai-gateway.sh" '"policies": [{'
 assert_contains "$repo_root/infra/scripts/configure-ai-gateway.ps1" 'policies = @('
+for script_file in \
+  "$repo_root/infra/scripts/configure-ai-gateway.sh" \
+  "$repo_root/infra/scripts/configure-ai-gateway.ps1" \
+  "$repo_root/infra/scripts/manage-ai-gateway-lifecycle.sh" \
+  "$repo_root/infra/scripts/manage-ai-gateway-lifecycle.ps1"; do
+  assert_not_contains "$script_file" "python3"
+  assert_not_contains "$script_file" "github_credential_validator.py"
+  assert_not_contains "$script_file" "jq "
+done
 
 echo "APIM lifecycle tests passed."
