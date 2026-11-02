@@ -170,8 +170,14 @@ The Bicep layout separates model, hosted-agent, and gateway resources:
 - `infra/main.bicep` creates three resource groups and composes the deployment.
 - `infra/foundry-models/main.bicep` owns model deployments in a separate AI Services account.
 - `infra/foundry-agents/main.bicep` owns the Foundry project, storage, container registry, and monitoring resources.
-- `infra/ai-gateway/main.bicep` owns AI Gateway, the connector namespace, Foundry provider, model catalog entries, telemetry, ToolServer resource surface, and runtime API key.
+- `infra/ai-gateway/main.bicep` owns standalone AI Gateway, the connector namespace, Foundry provider, model catalog entries, aliases, telemetry, ToolServer resource surface, and runtime API key.
 - `infra/ai-gateway/foundry-user-role.bicep` grants the gateway managed identity Foundry User access to the model account.
+
+Module responsibilities are documented in [`infra/README.md`](../infra/README.md) and each module's README.
+
+The gateway resource is `Microsoft.ApiManagement/aigateways@2025-09-01-preview`, with `Consumption` SKU, system-assigned identity, and empty `properties: {}`. It is not a `Microsoft.ApiManagement/service` resource. Its existing `workspaces/default` resource is the parent for telemetry exporters, model providers and their catalog models, aliases, and ToolServers. Runtime `apiKeys` are direct children of the gateway, not of the workspace.
+
+The runtime endpoint uses `properties.frontend.defaultHostname`, falling back to `properties.gatewayUrl`. Endpoint normalization preserves the existing `/default/models/openai/v1/` and `/default/toolservers/github/mcp` routes.
 
 Storage shared key access, Cognitive Services local authentication, and Container Registry admin credentials are disabled. Project access uses Microsoft Entra ID and managed identities.
 
@@ -182,14 +188,13 @@ The templates currently allow public network access because this quickstart has 
 The preprovision hook:
 
 1. Preserves a healthy, environment-owned AI Gateway.
-2. Deletes only an environment-owned gateway in terminal `Failed` state.
-3. Purges the matching APIM soft-delete record.
-4. Waits for managed identity cleanup before Bicep retries creation.
-5. Removes legacy script-owned Foundry User role assignments so Bicep can adopt the assignment.
+2. Deletes only an environment-owned gateway in terminal `Failed` state, or waits for an existing deletion; other nonterminal states fail closed.
+3. Waits for standalone gateway deletion and managed identity cleanup before Bicep retries creation.
+4. Removes legacy script-owned Foundry User role assignments so Bicep can adopt the assignment.
 
 The postprovision hook:
 
-1. Verifies Bicep created the canonical `Microsoft.ApiManagement/service` resource with `AIGateway` SKU and system-assigned identity.
+1. Verifies Bicep created a standalone `Microsoft.ApiManagement/aigateways` resource with `Consumption` SKU and system-assigned identity.
 2. Verifies the Foundry provider uses managed identity.
 3. Reads the active GitHub CLI token.
 4. Configures the read-only GitHub ToolServer.
@@ -199,20 +204,29 @@ The postprovision hook:
 8. Creates the Foundry Toolbox if it does not exist.
 9. Saves only runtime configuration required by the hosted agent.
 
-The postdown hook completes deletion, soft-delete purge, and the same identity settle wait.
+The postdown hook completes deletion and the same identity settle wait. Standalone gateway cleanup does not access or purge legacy APIM `deletedservices` records.
 
-The lifecycle implementation does not persist a lifecycle marker or discover a missing gateway by walking recent nested deployment failures. It uses the exact resource outputs when available, otherwise requires a unique environment-tagged AI Gateway, preserves healthy gateways during preprovision, deletes failed or explicitly cleaned-up gateways, validates the APIM soft-delete `serviceId`, purges it, and waits for identity cleanup. Only a confirmed 404 is treated as absence; authorization, throttling, and service errors fail closed.
+The lifecycle uses exact resource outputs when available; otherwise it looks for a unique environment-tagged `Microsoft.ApiManagement/aigateways` resource with `Consumption` SKU. If outputs are incomplete and no live candidate is found, it examines the 10 most recent failed subscription deployments and their failed nested resource-group deployment operations, bounded to depth 3 and 30 nested deployments.
+
+A recovery candidate must be a failed operation with `FailedIdentityOperation` or `ActivationFailed`, targeting an exact standalone gateway resource type and ID in the current subscription. Retired APIM services and child resources do not qualify. The resource group and gateway name must match supplied hints or the environment's deterministic naming, including the shared resource token; the resource group's `azd-env-name` tag must also match. Candidate IDs are deduplicated; no candidates means no cleanup is needed. Ambiguous candidates, traversal-limit exhaustion, and ownership failures stop recovery rather than guessing.
+
+Live ownership and SKU checks still apply before deletion, healthy gateways are preserved, and other nonterminal live states fail closed even when a deployment failure matched. Cleanup waits for deletion and identity settling, including when a recovered gateway is already absent. Only a confirmed 404 is treated as absence; authorization, throttling, and service errors fail closed.
 
 ## Model deployment
 
-The default model catalog aliases are:
+The default `GlobalStandard` model deployments are:
 
-- `gpt-latest`, backed by `gpt-5.6-sol` version `2026-07-09`
-- `gpt-mini-latest`, backed by `gpt-5.4-mini` version `2026-03-17`
+| Deployment name | Foundry model | Version | Capacity |
+| --- | --- | --- | --- |
+| `gpt-6-1-sol` | `gpt-6.1-sol` | `2026-09-29` | 20 |
+| `gpt-6-sol` | `gpt-6-sol` | `2026-09-22` | 20 |
+| `gpt-5-4-mini` | `gpt-5.4-mini` | `2026-03-17` | 200 |
 
-The full model uses `GlobalStandard` capacity 20 by default. The mini model uses capacity 200 to accommodate GitHub Copilot app requests that include large built-in tool schemas. These are deployment defaults, not application constants. Change Bicep parameters when model availability or quota differs by subscription or region.
+`gpt-latest` is the public alias served by `primary-router`. Its backends select `gpt-6-1-sol` at priority 0, `gpt-6-sol` at priority 1, and `gpt-5-4-mini` at priority 2, each with weight 100. `modelAliasBackends` overrides this primary chain. `gpt-mini-latest` uses `mini-router` with the mini backend at priority 0 and weight 100.
 
-Each Gateway catalog registration sets `deployment.modelName` from the final segment of the Foundry deployment `resourceId`, not from the backing catalog model name. The Gateway token-limit policy is derived from the corresponding deployment capacity at 1,000 tokens per capacity unit. This keeps the registration aligned with the actual Foundry deployment name and prevents Gateway throttling below the backing deployment's tokens-per-minute quota.
+Alias backends reference Gateway catalog model resource IDs, not raw `Microsoft.CognitiveServices/accounts/deployments` IDs. The catalog entries reference those Foundry deployment IDs and set `deployment.modelName` to the final segment of the deployment `resourceId`, not the backing catalog model name.
+
+These are infrastructure defaults, not application constants. The mini capacity accommodates GitHub Copilot app requests with large built-in tool schemas. Adjust deployment parameters for regional availability and quota. Inline model policies are not supported by this standalone API; no Gateway token-limit policy is configured or derived from deployment capacity.
 
 AI Gateway model entries support:
 
@@ -259,3 +273,5 @@ dotnet test tests/FoundryHostedAgent.AIGateway.Tests/FoundryHostedAgent.AIGatewa
 bash tests/test-apim-lifecycle.sh
 bash tests/test-ai-gateway-model-registration.sh
 ```
+
+For a live hosted-agent check, authenticate Azure CLI and azd, select an azd environment, then run `bash tests/test-azd-smoke.sh`. It invokes the existing deployment by default. Opt-in `--deploy` runs `azd deploy` first; `--up` runs `azd up --no-prompt` first and also requires provisioning credentials. This checks the digest response, not actual fallback or failover between model backends.

@@ -1,5 +1,12 @@
+using System.ClientModel.Primitives;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json.Nodes;
+using Azure.Core;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using OpenAI.Chat;
 using Xunit;
 
 using RepoDigestAgent;
@@ -235,5 +242,103 @@ public sealed class GitHubMcpMiddlewareTests
 
         Assert.Same(content.AdditionalProperties, compact.AdditionalProperties);
         Assert.DoesNotContain("large body", compact.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GatewayClientUsesBearerTokenWhenApiKeyOmitted()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AZURE_AI_GATEWAY_ENDPOINT"] = "https://aigw.example.com/"
+            })
+            .Build();
+        var credential = new RecordingTokenCredential("entra-token-123");
+        var handler = new RecordingHttpMessageHandler();
+        var transport = new HttpClientPipelineTransport(new HttpClient(handler));
+
+        var client = DailyRepoDigestAgent.GatewayClient(configuration, credential, transport);
+        await client.CompleteChatAsync([new UserChatMessage("hello")]);
+
+        Assert.Equal([DailyRepoDigestAgent.AiGatewayTokenScope], credential.RequestedScopes);
+        Assert.Equal("Bearer entra-token-123", handler.AuthorizationHeader);
+        Assert.Null(handler.ApiKeyHeader);
+    }
+
+    [Fact]
+    public async Task GatewayClientUsesApiKeyWithoutBearerHeaderWhenProvided()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AZURE_AI_GATEWAY_ENDPOINT"] = "https://aigw.example.com/",
+                ["AZURE_AI_GATEWAY_API_KEY"] = "gateway-secret"
+            })
+            .Build();
+        var handler = new RecordingHttpMessageHandler();
+        var transport = new HttpClientPipelineTransport(new HttpClient(handler));
+
+        var client = DailyRepoDigestAgent.GatewayClient(configuration, transport: transport);
+        await client.CompleteChatAsync([new UserChatMessage("hello")]);
+
+        Assert.Equal("gateway-secret", handler.ApiKeyHeader);
+        Assert.Null(handler.AuthorizationHeader);
+    }
+
+    private sealed class RecordingTokenCredential(string token) : TokenCredential
+    {
+        public string[] RequestedScopes { get; private set; } = [];
+
+        public override AccessToken GetToken(
+            TokenRequestContext requestContext,
+            CancellationToken cancellationToken)
+        {
+            RequestedScopes = requestContext.Scopes;
+            return new AccessToken(token, DateTimeOffset.UtcNow.AddHours(1));
+        }
+
+        public override ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(GetToken(requestContext, cancellationToken));
+    }
+
+    private sealed class RecordingHttpMessageHandler : HttpMessageHandler
+    {
+        private const string ResponseJson =
+            """
+            {
+              "id": "chatcmpl-1",
+              "object": "chat.completion",
+              "created": 1700000000,
+              "model": "gpt-latest",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": { "role": "assistant", "content": "ok" },
+                  "finish_reason": "stop"
+                }
+              ]
+            }
+            """;
+
+        public string? AuthorizationHeader { get; private set; }
+        public string? ApiKeyHeader { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            AuthorizationHeader = request.Headers.TryGetValues("Authorization", out var auth)
+                ? string.Join(",", auth)
+                : null;
+            ApiKeyHeader = request.Headers.TryGetValues("Api-Key", out var apiKey)
+                ? string.Join(",", apiKey)
+                : null;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(ResponseJson, Encoding.UTF8, "application/json")
+            });
+        }
     }
 }

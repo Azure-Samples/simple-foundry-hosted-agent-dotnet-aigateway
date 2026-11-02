@@ -94,7 +94,7 @@ hooks:
     preprovision:
         windows:
             shell: pwsh
-            run: ./infra/scripts/configure-ai-gateway.ps1 -PrepareBicep
+            run: ./infra/scripts/configure-ai-gateway.ps1 --prepare-bicep
         posix:
             shell: sh
             run: bash ./infra/scripts/configure-ai-gateway.sh --prepare-bicep

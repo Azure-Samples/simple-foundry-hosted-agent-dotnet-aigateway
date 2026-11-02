@@ -108,14 +108,13 @@ resource appInsightsConnection 'Microsoft.CognitiveServices/accounts/connections
   name: appInsights.name
   properties: {
     category: 'AppInsights'
-    authType: 'ApiKey'
+    #disable-next-line BCP036
+    authType: 'ProjectManagedIdentity'
     isSharedToAll: false
     target: appInsights.id
-    credentials: {
-      key: appInsights.properties.ConnectionString
-    }
     metadata: {
       ApiType: 'Azure'
+      ApplicationInsightsConnectionString: appInsights.properties.ConnectionString
       ResourceId: appInsights.id
       displayName: appInsights.name
     }
@@ -175,6 +174,27 @@ var cognitiveServicesOpenAIUserRoleDefinitionId = '5e0bd9bd-7b93-4f28-af87-19fc3
 var cognitiveServicesUserRoleDefinitionId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
 var storageBlobDataContributorRoleDefinitionId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 var acrPullRoleDefinitionId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+var monitoringMetricsPublisherRoleDefinitionId = '3913510d-42f4-4e42-8a64-420c390055eb'
+
+resource appInsightsMetricsPublisherAssignmentAccount 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: appInsights
+  name: guid(appInsights.id, monitoringMetricsPublisherRoleDefinitionId, aiServices.id)
+  properties: {
+    principalId: aiServices.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringMetricsPublisherRoleDefinitionId)
+  }
+}
+
+resource appInsightsMetricsPublisherAssignmentProject 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: appInsights
+  name: guid(appInsights.id, monitoringMetricsPublisherRoleDefinitionId, aiProject.id)
+  properties: {
+    principalId: aiProject.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', monitoringMetricsPublisherRoleDefinitionId)
+  }
+}
 
 resource cognitiveServicesContributorAssignmentProject 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: aiServices
@@ -268,6 +288,7 @@ resource storageBlobDataContributorAssignmentUser 'Microsoft.Authorization/roleA
 
 output aiServicesName string = aiServices.name
 output aiServicesId string = aiServices.id
+output aiServicesPrincipalId string = aiServices.identity.principalId
 output aiServicesEndpoint string = aiServices.properties.endpoint
 output aiProjectName string = aiProject.name
 output aiProjectResourceId string = aiProject.id
