@@ -1,33 +1,44 @@
-# Foundry agents module
+# Foundry project and hosted-agent runtime
 
-[`main.bicep`](main.bicep) provisions the hosted-agent environment independently of the model account:
+Run the commands in this README from the `infra/foundry-agents/` directory.
 
-- AI Services account with project management enabled and a managed-identity Foundry project.
-- Storage account for artifacts, with shared-key access disabled.
-- Premium Container Registry with admin credentials disabled.
-- Project storage and registry connections and required identity role assignments.
-- Application Insights and Log Analytics for hosted-agent tracing.
+[`main.bicep`](main.bicep) creates a project-enabled Azure AI Services account
+(`allowProjectManagement: true`), a Foundry project, and its hosted-agent
+dependencies:
 
-Outputs expose the project endpoint, registry, monitoring resources, and connection names to azd. The hosted runtime uses managed identity for Foundry Toolbox. Model calls use AI Gateway and its runtime key, not this account's model endpoint.
+- Storage Account and project storage connection.
+- Premium Azure Container Registry (ACR) and project registry connection.
+- Log Analytics workspace and Application Insights component/connection.
+- Project and optional developer RBAC assignments, including the permissions
+  needed for the project to use its account, storage, and registry.
 
-The .NET 10 agent remains in [`agent/`](../../agent/); this module does not implement application routes or tool middleware. The Foundry hosting package maps `/responses` and `/readiness`.
-
-Public networking is enabled for this quickstart. Review networking and access requirements before using sensitive data.
-
-## Deploy independently
-
-From the repository root:
+Deploy this resource-group-scoped module independently by supplying names for
+its required resources:
 
 ```bash
-az group create --name rg-digest-agents --location eastus2
-az deployment group create --resource-group rg-digest-agents \
-  --template-file infra/foundry-agents/main.bicep \
-  --parameters aiServicesName=your-unique-agent-account \
-  aiProjectName=digest aiProjectDescription='Daily repo digest' \
-  storageName=youruniquestorage containerRegistryName=youruniqueregistry \
-  appInsightsName=digest-agent-insights logAnalyticsWorkspaceName=digest-agent-logs
+az group create --name rg-foundry-agents --location eastus2
+
+az deployment group create \
+  --resource-group rg-foundry-agents \
+  --template-file ./main.bicep \
+  --parameters location=eastus2 \
+               aiServicesName=aiagents-example \
+               aiProjectName=repo-digest \
+               aiProjectFriendlyName="Daily Repo Digest" \
+               aiProjectDescription="Foundry Hosted Agent sample." \
+               storageName=stexample001 \
+               containerRegistryName=acrexample123 \
+               appInsightsName=aiagents-example-insights \
+               logAnalyticsWorkspaceName=aiagents-example-logs \
+               principalId="$(az ad signed-in-user show --query id -o tsv)"
 ```
 
-The command supplies all required parameters. `location` defaults to the resource group, `aiProjectFriendlyName` defaults to the project name, and `principalId` is optional development access. Use globally unique account, storage, and registry names.
+Resource names must meet the naming rules for their Azure resource types and be
+available. Omit `principalId` if the deploying developer does not need optional
+user-level role assignments.
 
-This creates infrastructure only. ARM outputs do not run hooks, populate azd configuration, deploy the hosted agent, or create the Toolbox. Use the root `azd up` flow for those steps.
+Useful deployment outputs:
+
+- `projectEndpoint`: Foundry project endpoint for clients and Toolbox setup.
+- `containerRegistryEndpoint`: ACR login server for hosted-agent images.
+- `aiProjectResourceId`: resource ID of the Foundry project.

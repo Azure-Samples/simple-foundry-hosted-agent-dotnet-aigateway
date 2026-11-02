@@ -1,4 +1,3 @@
-using Azure.Identity;
 using DotNetEnv;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using RepoDigestAgent;
@@ -6,15 +5,11 @@ using RepoDigestAgent;
 Env.NoClobber().TraversePath().Load();
 
 var builder = WebApplication.CreateBuilder(args);
-var credentialOptions = new DefaultAzureCredentialOptions
-{
-    ExcludeManagedIdentityCredential =
-        string.IsNullOrWhiteSpace(builder.Configuration["FOUNDRY_HOSTING_ENVIRONMENT"])
-};
+var credential = DailyRepoDigestAgent.CreateAzureCredential(builder.Configuration);
 
-builder.Services.AddFoundryResponses(DailyRepoDigestAgent.Build(builder.Configuration));
+builder.Services.AddFoundryResponses(DailyRepoDigestAgent.Build(builder.Configuration, credential));
 builder.Services.AddFoundryToolboxes(
-    new DefaultAzureCredential(credentialOptions),
+    credential,
     DailyRepoDigestAgent.ToolboxName(builder.Configuration));
 
 var app = builder.Build();

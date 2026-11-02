@@ -1,41 +1,96 @@
-#!/usr/bin/env pwsh
-
-[CmdletBinding()]
-param(
-    [switch]$PrepareBicep
-)
-
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
+
 $aiGatewayApiVersion = "2025-09-01-preview"
-$legacyApiVersion = "2024-05-01"
+$legacyAiGatewayApiVersion = "2025-09-01-preview"
 $foundryUserRoleId = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+$monitoringMetricsPublisherRoleId = "3913510d-42f4-4e42-8a64-420c390055eb"
+$appInsightsApiVersion = "2020-02-02"
+$roleAssignmentsApiVersion = "2022-04-01"
 $defaultRepository = "microsoft/agent-framework"
 $githubMcpServer = "https://api.githubcopilot.com/mcp/"
 $githubMcpTools = "list_pull_requests,list_issues,actions_list"
-$toolboxConnectionName = "aigw-github"
 $toolboxName = "repo-digest-tools"
-$leastPrivilegeFixDoc = "docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 
-function Get-AzdValue([string]$Name) {
+function Get-AzdValue($Name) {
     try {
-        return ([string](azd env get-value $Name 2>$null)).Trim()
+        $value = azd env get-value $Name 2>$null
+        return $value.Trim()
     } catch {
         return ""
     }
 }
 
-function Get-FirstValue([string[]]$Values) {
+function First-Value([string[]]$Values) {
     foreach ($value in $Values) {
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            return $value
-        }
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
     }
     return ""
 }
 
-function Test-GatewayModelRoute([string]$GatewayUrl, [string]$Model, [string]$ApiKey) {
+function Require-Value($Name, $Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$Name is required after azd provision."
+    }
+    return $Value
+}
+
+function Remove-AzdEnvValues([string[]]$Names) {
+    $envFile = $env:AZD_ENV_FILE
+    if ([string]::IsNullOrWhiteSpace($envFile)) {
+        $envFile = Join-Path (Get-Location) ".azure/$environmentName/.env"
+    }
+    if (-not (Test-Path $envFile)) { return }
+    $remove = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in $Names) { [void]$remove.Add($name) }
+    $lines = Get-Content $envFile | Where-Object {
+        $key = ($_ -split "=", 2)[0]
+        -not $remove.Contains($key)
+    }
+    Set-Content -Path $envFile -Value $lines
+}
+
+function Test-AzRestResource($Uri) {
+    try {
+        az rest --method get --uri $Uri -o none 2>$null | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-AzRestPutJson($Uri, $Body) {
+    $tempFile = [IO.Path]::GetTempFileName()
+    try {
+        $json = $Body | ConvertTo-Json -Depth 30 -Compress
+        [IO.File]::WriteAllText($tempFile, $json, [Text.UTF8Encoding]::new($false))
+        az rest --method put --uri $Uri --body "@$tempFile" -o none | Out-Null
+    } finally {
+        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-GatewayApiKeyValue($GatewayResourceId) {
+    $listSecretsUri = "https://management.azure.com${GatewayResourceId}/apiKeys/default/listSecrets?api-version=$aiGatewayApiVersion"
+    try {
+        $value = az rest --method post --uri $listSecretsUri --body "{}" --query "key || primaryKey || properties.primaryKey || primaryValue || properties.primaryValue" -o tsv 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    } catch {
+        Write-Verbose "The current backend does not expose listSecrets; trying listValues."
+    }
+
+    $listValuesUri = "https://management.azure.com${GatewayResourceId}/apiKeys/default/listValues?api-version=$aiGatewayApiVersion"
+    try {
+        $value = az rest --method post --uri $listValuesUri --body "{}" --query "primaryValue || properties.primaryValue || primaryKey || properties.primaryKey" -o tsv 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
+function Test-GatewayModelRoute($GatewayUrl, $Model, $ApiKey) {
     $uri = $GatewayUrl.TrimEnd("/") + "/default/models/openai/v1/chat/completions"
     $headers = @{ "Api-Key" = $ApiKey }
     $body = @{
@@ -57,172 +112,178 @@ function Test-GatewayModelRoute([string]$GatewayUrl, [string]$Model, [string]$Ap
                 -Uri $uri `
                 -Headers $headers `
                 -ContentType "application/json" `
-                -ConnectionTimeoutSeconds 10 `
-                -OperationTimeoutSeconds 30 `
                 -Body $body | Out-Null
             Write-Host "AI Gateway model route is ready."
             return
         } catch {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-            $responseBody = [string]$_.ErrorDetails.Message
-            $lastError = "HTTP $statusCode"
-            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
-                $lastError += ": $responseBody"
-            } else {
-                $lastError += ": $($_.Exception.Message)"
-            }
+            $lastError = $_.Exception.Message
             if ($attempt -lt 15) {
-                Write-Host "Waiting for the AI Gateway model route, attempt=$attempt, status=$statusCode"
+                Write-Host "Waiting for the AI Gateway model route, attempt=$attempt"
                 Start-Sleep -Seconds 4
             }
         }
     }
 
-    throw "AI Gateway model route failed. The route requires an explicit Api-Key header. Last response: $lastError"
+    throw "AI Gateway model route failed. The route requires an explicit Api-Key header. Last error: $lastError"
 }
 
-function Require-Value([string]$Name, [string]$Value) {
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        throw "$Name is required after azd provision."
-    }
-    return $Value
-}
-
-function Assert-GitHubAccess([string]$Repository, [string]$Token) {
-    if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
-        throw "GITHUB_REPOSITORY must use the owner/repository format."
-    }
-
-    # Advisory only: never block provisioning. Warn when the selected credential
-    # is broader than the recommended least-privilege token, so the documented
-    # 'gh auth status; azd up' flow keeps working while still nudging operators
-    # toward a fine-grained, repository-scoped, read-only token.
-    if ($Token -notmatch '^(github_pat_|ghs_)') {
-        Write-Warning "Using a broad, account-wide GitHub credential (OAuth or classic token). It works, but the postprovision hook stores it in the cloud AI Gateway ToolServer. For the least-privilege fix, see $leastPrivilegeFixDoc"
+function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $SubscriptionId) {
+    if ($MonitoringEnabled -notmatch "^(true|1|yes)$") {
+        Write-Host "AI Gateway monitoring is disabled; skipping OpenTelemetry exporter setup."
         return
     }
 
-    $previousToken = $env:GH_TOKEN
+    $gatewayAppInsightsId = Require-Value "AI_GATEWAY_APP_INSIGHTS_ID" (First-Value @($env:AI_GATEWAY_APP_INSIGHTS_ID, (Get-AzdValue "AI_GATEWAY_APP_INSIGHTS_ID")))
+    $logAnalyticsWorkspaceId = Require-Value "AI_GATEWAY_LOG_ANALYTICS_WORKSPACE_ID" (First-Value @($env:AI_GATEWAY_LOG_ANALYTICS_WORKSPACE_ID, (Get-AzdValue "AI_GATEWAY_LOG_ANALYTICS_WORKSPACE_ID")))
+    $gatewayPrincipalId = Require-Value "AI_GATEWAY_PRINCIPAL_ID" (First-Value @($env:AI_GATEWAY_PRINCIPAL_ID, (Get-AzdValue "AI_GATEWAY_PRINCIPAL_ID")))
+
+    $providerState = [string](az provider show --namespace Microsoft.Monitor --query registrationState -o tsv 2>$null)
+    if ($providerState -ne "Registered") {
+        Write-Host "Registering the Microsoft.Monitor resource provider."
+        az provider register --namespace Microsoft.Monitor --wait | Out-Null
+    }
+
+    $appInsightsUri = "https://management.azure.com${gatewayAppInsightsId}?api-version=$appInsightsApiVersion"
+    $appInsightsProperties = $null
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        try {
+            $appInsightsProperties = (az rest --method get --uri $appInsightsUri --query properties -o json 2>$null | ConvertFrom-Json)
+            if (-not [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+                break
+            }
+        } catch {
+            $appInsightsProperties = $null
+        }
+        Write-Host "Waiting for Application Insights managed DCR/DCE and OTLP endpoints, attempt=$attempt."
+        Start-Sleep -Seconds 10
+    }
+    if ($null -eq $appInsightsProperties -or
+        [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+        throw "Application Insights did not populate its managed DCR/DCE and OTLP endpoints."
+    }
+    if ($appInsightsProperties.WorkspaceResourceId -ne $logAnalyticsWorkspaceId) {
+        throw "AI Gateway Application Insights is not connected to the expected Log Analytics workspace."
+    }
+
+    $dcrScope = [string]$appInsightsProperties.DefaultDataCollectionRuleResourceId
+    $identityBytes = [Text.Encoding]::UTF8.GetBytes("$dcrScope|$gatewayPrincipalId|$monitoringMetricsPublisherRoleId")
+    $identityHash = [Security.Cryptography.SHA256]::HashData($identityBytes)
+    $roleAssignmentName = [guid]::new([byte[]]$identityHash[0..15]).ToString()
+    $roleAssignmentId = "$dcrScope/providers/Microsoft.Authorization/roleAssignments/$roleAssignmentName"
+    $roleDefinitionId = "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleDefinitions/$monitoringMetricsPublisherRoleId"
+    $roleAssignmentBody = @{
+        properties = @{
+            principalId = $gatewayPrincipalId
+            principalType = "ServicePrincipal"
+            roleDefinitionId = $roleDefinitionId
+        }
+    }
+    Write-Host "Assigning Monitoring Metrics Publisher at the Application Insights managed DCR scope."
+    Invoke-AzRestPutJson "https://management.azure.com${roleAssignmentId}?api-version=$roleAssignmentsApiVersion" $roleAssignmentBody
+
+    $exporterUri = "https://management.azure.com${GatewayResourceId}/workspaces/default/telemetryExporters/applicationInsights?api-version=$aiGatewayApiVersion"
+    $exporterExists = $true
     try {
-        $env:GH_TOKEN = $Token
-        foreach ($endpoint in @(
-            "repos/$Repository",
-            "repos/$Repository/pulls?per_page=1",
-            "repos/$Repository/issues?per_page=1",
-            "repos/$Repository/actions/runs?per_page=1"
-        )) {
-            try {
-                gh api $endpoint --silent 2>$null
-            } catch {
-                Write-Warning "Could not verify read access at $($endpoint.Split('?')[0]). Provisioning continues. Prefer a repo-scoped, read-only credential; see $leastPrivilegeFixDoc"
+        $exporterKind = [string](az rest --method get --uri $exporterUri --query properties.kind -o tsv 2>$null)
+    } catch {
+        $exporterExists = $false
+        $exporterKind = ""
+    }
+    if ($exporterExists -and $exporterKind -ne "OpenTelemetry") {
+        Write-Host "Replacing the legacy Application Insights exporter because exporter kind is immutable."
+        az rest --method delete --uri $exporterUri -o none
+        $exporterDeleted = $false
+        for ($attempt = 1; $attempt -le 30; $attempt++) {
+            if (-not (Test-AzRestResource $exporterUri)) {
+                $exporterDeleted = $true
+                break
+            }
+            Write-Host "Waiting for the legacy telemetry exporter deletion, attempt=$attempt."
+            Start-Sleep -Seconds 2
+        }
+        if (-not $exporterDeleted) {
+            throw "The legacy telemetry exporter was not deleted before recreation."
+        }
+    }
+
+    $exporterBody = @{
+        properties = @{
+            kind = "OpenTelemetry"
+            payloadCapture = $false
+            applicationInsights = @{
+                resourceId = $gatewayAppInsightsId
+            }
+            openTelemetry = @{
+                metricsEndpoint = [string]$appInsightsProperties.MetricsIngestionEndpoint
+                logsEndpoint = [string]$appInsightsProperties.LogsIngestionEndpoint
+                tracesEndpoint = [string]$appInsightsProperties.TracesIngestionEndpoint
+                credentials = @{
+                    managedIdentity = @{
+                        resource = "https://monitor.azure.com"
+                    }
+                }
             }
         }
-    } finally {
-        $env:GH_TOKEN = $previousToken
     }
-}
-
-function Remove-AzdEnvValues([string[]]$Names) {
-    $environmentName = Get-FirstValue @($env:AZURE_ENV_NAME, (Get-AzdValue "AZURE_ENV_NAME"))
-    $envFile = Get-FirstValue @($env:AZD_ENV_FILE, ".azure/$environmentName/.env")
-    if (-not (Test-Path $envFile)) {
-        return
-    }
-    $remove = [Collections.Generic.HashSet[string]]::new(
-        $Names,
-        [StringComparer]::Ordinal
-    )
-    $lines = Get-Content $envFile | Where-Object {
-        -not $remove.Contains(($_ -split "=", 2)[0])
-    }
-    [IO.File]::WriteAllLines($envFile, $lines, [Text.UTF8Encoding]::new($false))
-}
-
-function Get-OptionalAzRestResource([string]$Uri) {
-    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
-    try {
-        $PSNativeCommandUseErrorActionPreference = $false
-        $outputLines = @(& az rest --method get --uri $Uri -o json 2>&1)
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
-    }
-
-    $body = ($outputLines | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
-    if ($exitCode -eq 0) {
-        return $body | ConvertFrom-Json
-    }
-    if ($body -match '(?im)(^ERROR:\s*(\((NotFound|ResourceNotFound)\)|(Not Found|NotFound|ResourceNotFound)([\s:({]|$))|"code"\s*:\s*"(NotFound|ResourceNotFound)"|"status(Code)?"\s*:\s*404)') {
-        return $null
-    }
-    throw "Azure REST GET failed for $Uri. $body"
+    Write-Host "Configuring the native OpenTelemetry exporter for AI Gateway."
+    Invoke-AzRestPutJson $exporterUri $exporterBody
 }
 
 function Prepare-BicepRbac {
-    $subscriptionId = Get-FirstValue @(
-        $env:AZURE_SUBSCRIPTION_ID,
-        (Get-AzdValue "AZURE_SUBSCRIPTION_ID"),
-        ([string](az account show --query id -o tsv 2>$null)).Trim()
-    )
-    $resourceGroup = Get-FirstValue @(
-        $env:AI_GATEWAY_RESOURCE_GROUP,
-        (Get-AzdValue "AI_GATEWAY_RESOURCE_GROUP"),
-        $env:RESOURCE_GROUP,
-        $env:AZURE_RESOURCE_GROUP,
-        (Get-AzdValue "RESOURCE_GROUP"),
-        (Get-AzdValue "AZURE_RESOURCE_GROUP")
-    )
-    $gatewayName = Get-FirstValue @(
-        $env:AI_GATEWAY_NAME,
-        (Get-AzdValue "AI_GATEWAY_NAME")
-    )
-    if (
-        [string]::IsNullOrWhiteSpace($subscriptionId) -or
+    $subscriptionId = First-Value @($env:AZURE_SUBSCRIPTION_ID, (Get-AzdValue "AZURE_SUBSCRIPTION_ID"), (az account show --query id -o tsv 2>$null))
+    $resourceGroup = First-Value @($env:AI_GATEWAY_RESOURCE_GROUP, (Get-AzdValue "AI_GATEWAY_RESOURCE_GROUP"), $env:RESOURCE_GROUP, $env:AZURE_RESOURCE_GROUP, (Get-AzdValue "RESOURCE_GROUP"), (Get-AzdValue "AZURE_RESOURCE_GROUP"))
+    $gatewayName = First-Value @($env:AI_GATEWAY_NAME, (Get-AzdValue "AI_GATEWAY_NAME"))
+    if ([string]::IsNullOrWhiteSpace($subscriptionId) -or
         [string]::IsNullOrWhiteSpace($resourceGroup) -or
-        [string]::IsNullOrWhiteSpace($gatewayName)
-    ) {
+        [string]::IsNullOrWhiteSpace($gatewayName)) {
         return
     }
 
     $gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
-    $legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
-    $gateway = Get-OptionalAzRestResource "https://management.azure.com${gatewayResourceId}?api-version=$aiGatewayApiVersion"
-    if ($null -eq $gateway) {
-        $legacy = Get-OptionalAzRestResource "https://management.azure.com${legacyResourceId}?api-version=$legacyApiVersion"
-        if ($null -ne $legacy) {
-            throw "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment; Bicep will not create a standalone AI Gateway alongside it."
+    $legacyGatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
+    $gatewayUri = "https://management.azure.com${gatewayResourceId}?api-version=$aiGatewayApiVersion"
+    if (-not (Test-AzRestResource $gatewayUri)) {
+        $legacyGatewayUri = "https://management.azure.com${legacyGatewayResourceId}?api-version=$legacyAiGatewayApiVersion"
+        if (Test-AzRestResource $legacyGatewayUri) {
+            throw "The environment uses the retired Microsoft.ApiManagement/service AI Gateway resource. Use a fresh azd environment; Bicep will not create a canonical gateway alongside it."
         }
         return
     }
 
-    $principalId = [string]$gateway.identity.principalId
-    $provider = Get-OptionalAzRestResource "https://management.azure.com${gatewayResourceId}/workspaces/default/modelProviders/foundry?api-version=$aiGatewayApiVersion"
-    $accountId = if ($null -ne $provider) {
-        [string]$provider.properties.foundry.resourceIds[0]
-    } else {
-        ""
+    $principalId = [string](az rest --method get --uri $gatewayUri --query identity.principalId -o tsv)
+    try {
+        $accountId = [string](az rest `
+            --method get `
+            --uri "https://management.azure.com${gatewayResourceId}/workspaces/default/modelProviders/foundry?api-version=$aiGatewayApiVersion" `
+            --query "properties.foundry.resourceIds[0]" `
+            -o tsv 2>$null)
+    } catch {
+        $accountId = ""
     }
     if ([string]::IsNullOrWhiteSpace($accountId)) {
         $accountId = Get-AzdValue "FOUNDRY_MODELS_RESOURCE_ID"
     }
-    if (
-        [string]::IsNullOrWhiteSpace($principalId) -or
-        [string]::IsNullOrWhiteSpace($accountId)
-    ) {
+    if ([string]::IsNullOrWhiteSpace($principalId) -or [string]::IsNullOrWhiteSpace($accountId)) {
         return
     }
 
     $expectedAssignmentName = Get-AzdValue "AI_GATEWAY_FOUNDRY_ROLE_ASSIGNMENT_NAME"
-    $expectedPrincipalId = Get-AzdValue "AI_GATEWAY_FOUNDRY_ROLE_ASSIGNMENT_PRINCIPAL_ID"
-    if (
-        -not [string]::IsNullOrWhiteSpace($expectedAssignmentName) -and
-        $expectedPrincipalId -ne $principalId
-    ) {
-        $savedAssignmentId = ([string](az role assignment list `
+    $expectedAssignmentPrincipalId = Get-AzdValue "AI_GATEWAY_FOUNDRY_ROLE_ASSIGNMENT_PRINCIPAL_ID"
+    if (-not [string]::IsNullOrWhiteSpace($expectedAssignmentName) -and
+        $expectedAssignmentPrincipalId -ne $principalId) {
+        $savedAssignmentId = [string](az role assignment list `
             --subscription $subscriptionId `
             --scope $accountId `
             --query "[?name=='$expectedAssignmentName'].id | [0]" `
-            -o tsv)).Trim()
+            -o tsv)
         if (-not [string]::IsNullOrWhiteSpace($savedAssignmentId)) {
             Write-Host "Removing the previous Gateway identity's Foundry User assignment."
             az role assignment delete --subscription $subscriptionId --ids $savedAssignmentId
@@ -230,138 +291,166 @@ function Prepare-BicepRbac {
         $expectedAssignmentName = ""
     }
 
-    $assignments = @(
-        az role assignment list `
-            --subscription $subscriptionId `
-            --assignee-object-id $principalId `
-            --scope $accountId `
-            --role $foundryUserRoleId `
-            --query "[].{id:id,name:name}" `
-            -o json | ConvertFrom-Json
-    )
+    $assignments = az role assignment list `
+        --subscription $subscriptionId `
+        --assignee-object-id $principalId `
+        --scope $accountId `
+        --role $foundryUserRoleId `
+        --query "[].{id:id,name:name}" `
+        -o json | ConvertFrom-Json
     foreach ($assignment in $assignments) {
-        if (
-            -not [string]::IsNullOrWhiteSpace($expectedAssignmentName) -and
-            $expectedPrincipalId -eq $principalId -and
-            [string]$assignment.name -eq $expectedAssignmentName
-        ) {
+        if (-not [string]::IsNullOrWhiteSpace($expectedAssignmentName) -and
+            $expectedAssignmentPrincipalId -eq $principalId -and
+            $assignment.name -eq $expectedAssignmentName) {
             continue
         }
         Write-Host "Removing the legacy script-owned Foundry User assignment so Bicep can adopt it."
-        az role assignment delete --subscription $subscriptionId --ids ([string]$assignment.id)
+        az role assignment delete --subscription $subscriptionId --ids $assignment.id
     }
 }
 
-if ($PrepareBicep) {
+$mode = $args.Count -gt 0 ? $args[0] : ""
+if ($mode -eq "--prepare-bicep") {
     & (Join-Path $PSScriptRoot "manage-ai-gateway-lifecycle.ps1") prepare
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
     Prepare-BicepRbac
     exit 0
 }
+if (-not [string]::IsNullOrWhiteSpace($mode)) {
+    throw "Usage: $PSCommandPath [--prepare-bicep]"
+}
 
-$environmentName = Require-Value "AZURE_ENV_NAME" (Get-FirstValue @(
-    $env:AZURE_ENV_NAME,
-    (Get-AzdValue "AZURE_ENV_NAME")
-))
-$subscriptionId = Require-Value "AZURE_SUBSCRIPTION_ID" (Get-FirstValue @(
-    $env:AZURE_SUBSCRIPTION_ID,
-    (Get-AzdValue "AZURE_SUBSCRIPTION_ID"),
-    ([string](az account show --query id -o tsv)).Trim()
-))
-$resourceGroup = Require-Value "AI_GATEWAY_RESOURCE_GROUP" (Get-FirstValue @(
-    $env:AI_GATEWAY_RESOURCE_GROUP,
-    (Get-AzdValue "AI_GATEWAY_RESOURCE_GROUP"),
-    $env:RESOURCE_GROUP,
-    $env:AZURE_RESOURCE_GROUP,
-    (Get-AzdValue "RESOURCE_GROUP"),
-    (Get-AzdValue "AZURE_RESOURCE_GROUP")
-))
-$gatewayName = Require-Value "AI_GATEWAY_NAME" (Get-FirstValue @(
-    $env:AI_GATEWAY_NAME,
-    (Get-AzdValue "AI_GATEWAY_NAME")
-))
-$gatewayModel = Require-Value "AZURE_AI_GATEWAY_MODEL" (Get-FirstValue @(
-    $env:AZURE_AI_GATEWAY_MODEL,
-    (Get-AzdValue "AZURE_AI_GATEWAY_MODEL")
-))
-$gatewayMiniModel = Require-Value "AZURE_AI_GATEWAY_MINI_MODEL" (Get-FirstValue @(
-    $env:AZURE_AI_GATEWAY_MINI_MODEL,
-    (Get-AzdValue "AZURE_AI_GATEWAY_MINI_MODEL")
-))
-$githubRepository = Get-FirstValue @(
-    $env:GITHUB_REPOSITORY,
-    (Get-AzdValue "GITHUB_REPOSITORY"),
-    $defaultRepository
-)
-$projectEndpoint = Require-Value "FOUNDRY_PROJECT_ENDPOINT" (Get-FirstValue @(
-    $env:FOUNDRY_PROJECT_ENDPOINT,
-    (Get-AzdValue "FOUNDRY_PROJECT_ENDPOINT")
-))
+Write-Host "Finishing the Bicep-provisioned AI Gateway with the local GitHub MCP credential."
+
+$environmentName = Require-Value "AZURE_ENV_NAME" (First-Value @($env:AZURE_ENV_NAME, (Get-AzdValue "AZURE_ENV_NAME")))
+$subscriptionId = Require-Value "AZURE_SUBSCRIPTION_ID" (First-Value @($env:AZURE_SUBSCRIPTION_ID, (Get-AzdValue "AZURE_SUBSCRIPTION_ID"), (az account show --query id -o tsv)))
+$resourceGroup = Require-Value "AI_GATEWAY_RESOURCE_GROUP" (First-Value @($env:AI_GATEWAY_RESOURCE_GROUP, (Get-AzdValue "AI_GATEWAY_RESOURCE_GROUP"), $env:RESOURCE_GROUP, $env:AZURE_RESOURCE_GROUP, (Get-AzdValue "RESOURCE_GROUP"), (Get-AzdValue "AZURE_RESOURCE_GROUP")))
+$gatewayName = Require-Value "AI_GATEWAY_NAME" (First-Value @($env:AI_GATEWAY_NAME, (Get-AzdValue "AI_GATEWAY_NAME")))
+$gatewayModel = Require-Value "AZURE_AI_GATEWAY_MODEL" (First-Value @($env:AZURE_AI_GATEWAY_MODEL, (Get-AzdValue "AZURE_AI_GATEWAY_MODEL")))
+$gatewayMiniModel = Require-Value "AZURE_AI_GATEWAY_MINI_MODEL" (First-Value @($env:AZURE_AI_GATEWAY_MINI_MODEL, (Get-AzdValue "AZURE_AI_GATEWAY_MINI_MODEL")))
+$githubRepository = First-Value @($env:GITHUB_REPOSITORY, (Get-AzdValue "GITHUB_REPOSITORY"), $defaultRepository)
+$projectEndpoint = Require-Value "FOUNDRY_PROJECT_ENDPOINT" (First-Value @($env:FOUNDRY_PROJECT_ENDPOINT, (Get-AzdValue "FOUNDRY_PROJECT_ENDPOINT")))
 
 $gatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/aigateways/$gatewayName"
-$legacyResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
-$workspaceName = Get-FirstValue @($env:AI_GATEWAY_WORKSPACE_NAME, "default")
+$legacyGatewayResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.ApiManagement/service/$gatewayName"
+$workspaceName = First-Value @($env:AI_GATEWAY_WORKSPACE_NAME, "default")
 $workspaceResourceId = "$gatewayResourceId/workspaces/$workspaceName"
 $gatewayUri = "https://management.azure.com${gatewayResourceId}?api-version=$aiGatewayApiVersion"
 
-$gateway = Get-OptionalAzRestResource $gatewayUri
-if ($null -eq $gateway) {
-    $legacyUri = "https://management.azure.com${legacyResourceId}?api-version=$legacyApiVersion"
-    $legacy = Get-OptionalAzRestResource $legacyUri
-    if ($null -ne $legacy) {
-        throw "The environment uses the retired Microsoft.ApiManagement/service resource. Use a fresh azd environment."
+if (-not (Test-AzRestResource $gatewayUri)) {
+    $legacyGatewayUri = "https://management.azure.com${legacyGatewayResourceId}?api-version=$legacyAiGatewayApiVersion"
+    if (Test-AzRestResource $legacyGatewayUri) {
+        throw "The environment uses the retired Microsoft.ApiManagement/service AI Gateway resource. Use a fresh azd environment; this hook will not access hidden projected APIM resources."
     }
-    throw "Bicep did not create the expected Microsoft.ApiManagement/aigateways AI Gateway: $gatewayName"
+    throw "Bicep did not create the expected Microsoft.ApiManagement/aigateways resource: $gatewayName"
 }
 
-if ($gateway.properties.provisioningState -ne "Succeeded") {
-    throw "The Bicep-provisioned AI Gateway is not ready: $($gateway.properties.provisioningState)"
+$gatewayState = [string](az rest --method get --uri $gatewayUri --query properties.provisioningState -o tsv)
+if ($gatewayState -ne "Succeeded") {
+    throw "The Bicep-provisioned AI Gateway is not ready: $gatewayState"
 }
-if ($gateway.identity.type -notin @("SystemAssigned", "SystemAssigned, UserAssigned")) {
+
+$identityType = [string](az rest --method get --uri $gatewayUri --query identity.type -o tsv)
+if (@("SystemAssigned", "SystemAssigned, UserAssigned") -notcontains $identityType) {
     throw "Bicep did not enable the required AI Gateway system-assigned identity."
 }
 
-$gatewayHostname = [string]$gateway.properties.frontend.defaultHostname
-$gatewayUrl = if (-not [string]::IsNullOrWhiteSpace($gatewayHostname) -and $gatewayHostname -ne "null") {
-    "https://$(($gatewayHostname -creplace '^https?://', '').TrimEnd('/'))/"
+$gatewayHost = Require-Value "AZURE_AI_GATEWAY_ENDPOINT" ([string](az rest --method get --uri $gatewayUri --query "properties.frontend.defaultHostname || properties.gatewayUrl" -o tsv))
+if ($gatewayHost.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase)) {
+    $gatewayUrl = $gatewayHost
+} elseif ($gatewayHost.StartsWith("http://", [StringComparison]::OrdinalIgnoreCase)) {
+    $gatewayUrl = "https://" + $gatewayHost.Substring(7)
 } else {
-    Require-Value "AZURE_AI_GATEWAY_ENDPOINT" ([string]$gateway.properties.gatewayUrl)
+    $gatewayUrl = "https://$gatewayHost"
 }
 if (-not $gatewayUrl.EndsWith("/", [StringComparison]::Ordinal)) {
     $gatewayUrl += "/"
 }
 
+$workspaceChildrenUri = "https://management.azure.com${workspaceResourceId}/modelProviders?api-version=$aiGatewayApiVersion"
+$workspaceChildrenReady = $false
+for ($attempt = 1; $attempt -le 30; $attempt++) {
+    if (Test-AzRestResource $workspaceChildrenUri) {
+        $workspaceChildrenReady = $true
+        break
+    }
+    Write-Host "Waiting for the Bicep-provisioned default workspace, attempt=$attempt"
+    Start-Sleep -Seconds 2
+}
+if (-not $workspaceChildrenReady) {
+    throw "AI Gateway did not expose child APIs for the required $workspaceName workspace."
+}
+
 $providerUri = "https://management.azure.com${workspaceResourceId}/modelProviders/foundry?api-version=$aiGatewayApiVersion"
-$providerAuth = ([string](az rest --method get --uri $providerUri --query properties.foundry.authentication.kind -o tsv)).Trim()
+$providerAuth = [string](az rest --method get --uri $providerUri --query properties.foundry.authentication.kind -o tsv)
 if ($providerAuth -ne "ManagedIdentity") {
     throw "Bicep did not configure the Foundry provider for managed identity."
 }
 
+$monitoringEnabled = First-Value @($env:ENABLE_MONITORING, (Get-AzdValue "ENABLE_MONITORING"), "true")
+Configure-GatewayMonitoring $monitoringEnabled $gatewayResourceId $subscriptionId
+
 Remove-AzdEnvValues @("GITHUB_MCP_TOKEN", "GITHUB_TOKEN")
 $githubToken = ""
-if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_MCP_GH_USER)) {
-    $githubToken = ([string](gh auth token --hostname github.com --user $env:GITHUB_MCP_GH_USER 2>$null)).Trim()
-} else {
-    $githubToken = ([string](gh auth token --hostname github.com 2>$null)).Trim()
+if ($null -ne (Get-Command gh -ErrorAction SilentlyContinue)) {
+    $legacyGitHubToken = $env:GITHUB_TOKEN
+    try {
+        Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($env:GITHUB_MCP_GH_USER)) {
+            $githubToken = [string](gh auth token --hostname github.com 2>$null)
+        } else {
+            $githubToken = [string](gh auth token --hostname github.com --user $env:GITHUB_MCP_GH_USER 2>$null)
+        }
+        if ($LASTEXITCODE -ne 0) { $githubToken = "" }
+    } finally {
+        if ($null -eq $legacyGitHubToken) {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+        } else {
+            $env:GITHUB_TOKEN = $legacyGitHubToken
+        }
+    }
 }
 if ([string]::IsNullOrWhiteSpace($githubToken)) {
-    throw "GitHub authentication is required. Run 'gh auth login --hostname github.com'."
+    throw "GitHub authentication is required for GitHub MCP. Run 'gh auth login --hostname github.com', or provide GH_TOKEN to GitHub CLI in CI."
 }
-Assert-GitHubAccess $githubRepository $githubToken
-$githubAuthorization = if ($githubToken.StartsWith("Bearer ", [StringComparison]::OrdinalIgnoreCase)) {
-    $githubToken
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if ($null -eq $pythonCommand) {
+    $pythonCommand = Get-Command python3 -ErrorAction SilentlyContinue
+}
+if ($null -eq $pythonCommand) {
+    throw "Python 3 is required to validate the GitHub MCP credential."
+}
+$env:GITHUB_MCP_TOKEN_TO_VALIDATE = $githubToken
+try {
+    & $pythonCommand.Source (Join-Path $repoRoot "github_credential_validator.py") $githubRepository
+    if ($LASTEXITCODE -ne 0) {
+        throw "GitHub MCP credential validation failed."
+    }
+} finally {
+    Remove-Item Env:GITHUB_MCP_TOKEN_TO_VALIDATE -ErrorAction SilentlyContinue
+}
+Write-Host "Using the active GitHub CLI login for GitHub MCP."
+if ($githubToken.StartsWith("Bearer ", [StringComparison]::OrdinalIgnoreCase)) {
+    $githubAuthorization = $githubToken
 } else {
-    "Bearer $githubToken"
+    $githubAuthorization = "Bearer $githubToken"
 }
 
+$toolServerUri = "https://management.azure.com${workspaceResourceId}/toolServers/github?api-version=$aiGatewayApiVersion"
 $toolServerBody = @{
     properties = @{
         displayName = "GitHub repository digest"
         description = "Read-only GitHub tools for repository digests."
         type = "mcp"
         failureMode = "failClosed"
+        policies = @(
+            @{
+                type = "contentSafety"
+                hateSeverity = "Medium"
+                selfHarmSeverity = "Medium"
+                sexualSeverity = "Medium"
+                violenceSeverity = "Medium"
+            }
+        )
         endpoints = @(
             @{
                 namespace = "github"
@@ -381,66 +470,17 @@ $toolServerBody = @{
             }
         )
     }
-} | ConvertTo-Json -Depth 12 -Compress
-
-$toolServerUri = "https://management.azure.com${workspaceResourceId}/toolServers/github?api-version=$aiGatewayApiVersion"
-Write-Host "Injecting the read-only GitHub MCP credential into the Bicep-provisioned ToolServer."
-$toolServerBodyPath = Join-Path ([IO.Path]::GetTempPath()) "aigw-toolserver-$([Guid]::NewGuid().ToString('N')).json"
-try {
-    if ($IsWindows) {
-        [IO.File]::WriteAllText($toolServerBodyPath, $toolServerBody, [Text.UTF8Encoding]::new($false))
-    } else {
-        $options = [IO.FileStreamOptions]::new()
-        $options.Mode = [IO.FileMode]::CreateNew
-        $options.Access = [IO.FileAccess]::Write
-        $options.Share = [IO.FileShare]::None
-        $options.UnixCreateMode = [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite
-        $stream = [IO.File]::Open($toolServerBodyPath, $options)
-        try {
-            $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
-            try {
-                $writer.Write($toolServerBody)
-            } finally {
-                $writer.Dispose()
-            }
-        } finally {
-            $stream.Dispose()
-        }
-    }
-    az rest --method put --uri $toolServerUri --body "@$toolServerBodyPath" -o none
-} finally {
-    Remove-Item $toolServerBodyPath -Force -ErrorAction SilentlyContinue
 }
+Write-Host "Injecting the read-only GitHub MCP credential into the Bicep-provisioned ToolServer."
+Invoke-AzRestPutJson $toolServerUri $toolServerBody
 $githubToken = $null
 $githubAuthorization = $null
 $toolServerBody = $null
 
-$gatewayApiKey = ""
-foreach ($operation in @("listSecrets", "listValues")) {
-    try {
-        $keyResult = az rest `
-            --method post `
-            --uri "https://management.azure.com${gatewayResourceId}/apiKeys/default/${operation}?api-version=$aiGatewayApiVersion" `
-            --body "{}" `
-            -o json | ConvertFrom-Json
-        $gatewayApiKey = Get-FirstValue @(
-            [string]$keyResult.primaryKey,
-            [string]$keyResult.properties.primaryKey,
-            [string]$keyResult.primaryValue,
-            [string]$keyResult.properties.primaryValue
-        )
-        if (-not [string]::IsNullOrWhiteSpace($gatewayApiKey)) {
-            break
-        }
-    } catch {
-        continue
-    }
-}
+$savedGatewayApiKey = First-Value @($env:AZURE_AI_GATEWAY_API_KEY, (Get-AzdValue "AZURE_AI_GATEWAY_API_KEY"))
+$gatewayApiKey = Get-GatewayApiKeyValue $gatewayResourceId
 if ([string]::IsNullOrWhiteSpace($gatewayApiKey)) {
-    $gatewayApiKey = Get-FirstValue @(
-        $env:AZURE_AI_GATEWAY_API_KEY,
-        (Get-AzdValue "AZURE_AI_GATEWAY_API_KEY")
-    )
+    $gatewayApiKey = $savedGatewayApiKey
 }
 $gatewayApiKey = Require-Value "AZURE_AI_GATEWAY_API_KEY" $gatewayApiKey
 
@@ -453,39 +493,57 @@ azd env set GITHUB_REPOSITORY $githubRepository
 azd env set AZURE_AI_GATEWAY_API_KEY $gatewayApiKey | Out-Null
 azd env set TOOLBOX_NAME $toolboxName
 
-Write-Host "Connecting Foundry Toolbox to the AI Gateway GitHub ToolServer."
-azd ai connection create $toolboxConnectionName `
-    --kind remote-tool `
-    --target "$($gatewayUrl.TrimEnd('/'))/default/toolservers/github/mcp" `
-    --auth-type custom-keys `
-    --custom-key "Api-Key=$gatewayApiKey" `
-    --force `
-    --no-prompt `
-    --project-endpoint $projectEndpoint `
-    -o json | Out-Null
+Write-Host "Connecting Foundry Toolbox using the Bicep-provisioned aigw-github connection."
 
+$toolboxExists = $true
 try {
-    $toolbox = azd ai toolbox show $toolboxName `
+    $toolboxJson = azd ai toolbox show $toolboxName `
         --no-prompt `
         --project-endpoint $projectEndpoint `
-        -o json 2>$null | ConvertFrom-Json
+        -o json 2>$null
 } catch {
+    $toolboxExists = $false
+}
+if (-not $toolboxExists) {
     Write-Host "Creating the Foundry Toolbox."
-    $toolbox = azd ai toolbox create $toolboxName `
-        --from-file (Join-Path $repoRoot "infra/toolbox.yaml") `
+    $toolboxJson = azd ai toolbox create $toolboxName `
+        --from-file (Join-Path $repoRoot "toolbox.yaml") `
         --no-prompt `
         --project-endpoint $projectEndpoint `
-        -o json | ConvertFrom-Json
+        -o json
 }
-azd env set TOOLBOX_ENDPOINT ([string]$toolbox.endpoint)
-
+$toolboxEndpoint = ($toolboxJson | Out-String | ConvertFrom-Json).endpoint
+azd env set TOOLBOX_ENDPOINT $toolboxEndpoint
 Remove-AzdEnvValues @(
     "AI_SERVICES_NAME",
+    "AI_GATEWAY_INTERNAL_MODEL_DEPLOYMENT",
+    "AI_GATEWAY_INTERNAL_MODEL_NAME",
+    "AI_GATEWAY_INTERNAL_MODEL_VERSION",
+    "AI_GATEWAY_INTERNAL_MINI_MODEL_DEPLOYMENT",
+    "AI_GATEWAY_INTERNAL_MINI_MODEL_NAME",
+    "AI_GATEWAY_INTERNAL_MINI_MODEL_VERSION",
     "MODEL_DEPLOYMENT_NAME",
     "AZURE_AI_MODEL_DEPLOYMENT_NAME",
+    "MODEL_NAME",
+    "MODEL_VERSION",
+    "LATEST_MODEL_DEPLOYMENT_NAME",
+    "LATEST_MODEL_NAME",
+    "LATEST_MODEL_VERSION",
+    "AI_PROJECT_DEPLOYMENTS",
+    "AZURE_AI_GATEWAY_MODEL_ALIAS",
+    "AZURE_AI_GATEWAY_MODEL_VERSION",
+    "AZURE_AI_GATEWAY_BASE_MODEL",
+    "AZURE_AI_GATEWAY_BASE_MINI_MODEL",
+    "AZURE_AI_GATEWAY_LATEST_MODEL_ALIAS",
+    "AZURE_AI_GATEWAY_LATEST_MODEL",
+    "AZURE_AI_GATEWAY_LATEST_MODEL_VERSION",
+    "AZURE_AI_GATEWAY_MODEL_ALIASES",
+    "AZURE_AI_GATEWAY_MODELS",
     "GITHUB_MCP_TOKEN",
     "GITHUB_TOKEN",
     "FOUNDRY_API_KEY"
 )
+
+& (Join-Path $repoRoot "scripts/create-dev-env.ps1") -Force
 
 Write-Host "AI Gateway setup complete. Bicep owns Azure resources; this hook injects the GitHub credential, connects Foundry Toolbox to AI Gateway, and saves the runtime key."

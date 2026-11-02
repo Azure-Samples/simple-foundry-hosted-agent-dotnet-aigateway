@@ -38,8 +38,6 @@ $endpoint = Require-AzdValue "AZURE_AI_GATEWAY_ENDPOINT"
 $gatewayKey = Require-AzdValue "AZURE_AI_GATEWAY_API_KEY"
 $model = Require-AzdValue "AZURE_AI_GATEWAY_MODEL"
 $miniModel = Require-AzdValue "AZURE_AI_GATEWAY_MINI_MODEL"
-$tenantId = Require-AzdValue "AZURE_TENANT_ID"
-$projectId = Require-AzdValue "AZURE_AI_PROJECT_ID"
 $toolboxEndpoint = Require-AzdValue "TOOLBOX_ENDPOINT"
 $toolboxName = Require-AzdValue "TOOLBOX_NAME"
 $repository = Get-AzdValue "GITHUB_REPOSITORY"
@@ -47,7 +45,6 @@ if ([string]::IsNullOrWhiteSpace($repository)) {
     $repository = "microsoft/agent-framework"
 }
 
-$foundryPortalUrl = "https://ai.azure.com/resource/overview?wsid=$projectId&tid=$tenantId"
 $lines = @(
     "AZURE_AI_GATEWAY_ENDPOINT=$(Quote-EnvValue $endpoint)"
     "AZURE_AI_GATEWAY_API_KEY=$(Quote-EnvValue $gatewayKey)"
@@ -98,4 +95,3 @@ try {
 }
 
 Write-Host "Created .env for agent development: $outputPath"
-Write-Host "Foundry project portal: $foundryPortalUrl"

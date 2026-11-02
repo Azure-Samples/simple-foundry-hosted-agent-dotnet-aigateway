@@ -2,26 +2,59 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work_root="$(mktemp -d)"
-trap 'rm -rf "$work_root"' EXIT
+lifecycle_script="$repo_root/infra/scripts/manage-ai-gateway-lifecycle.sh"
+powershell_script="$repo_root/infra/scripts/manage-ai-gateway-lifecycle.ps1"
+temp_root="$(mktemp -d)"
+trap 'rm -rf "$temp_root"' EXIT
 
-stub_bin="$work_root/bin"
-state_dir="$work_root/state"
-mkdir -p "$stub_bin" "$state_dir"
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_contains() {
+  local file="$1"
+  local expected="$2"
+  grep -Fq "$expected" "$file" ||
+    fail "expected '$expected' in $file"
+}
+
+assert_not_contains() {
+  local file="$1"
+  local unexpected="$2"
+  if grep -Fq "$unexpected" "$file"; then
+    fail "did not expect '$unexpected' in $file"
+  fi
+}
+
+assert_file_value() {
+  local file="$1"
+  local expected="$2"
+  local actual=""
+  [ -f "$file" ] && actual="$(cat "$file")"
+  [ "$actual" = "$expected" ] ||
+    fail "expected $file to contain '$expected', found '$actual'"
+}
+
+stub_bin="$temp_root/bin"
+mkdir -p "$stub_bin"
 
 cat > "$stub_bin/azd" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "env" ] && [ "${2:-}" = "get-value" ]; then
   case "${3:-}" in
-    AZURE_ENV_NAME) printf 'testenv' ;;
-    AZURE_SUBSCRIPTION_ID) printf '00000000-0000-0000-0000-000000000001' ;;
+    AZURE_ENV_NAME) printf '%s' "${STUB_ENVIRONMENT_NAME:-tues}" ;;
+    AZURE_SUBSCRIPTION_ID) printf '%s' "${STUB_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000001}" ;;
     AI_GATEWAY_RESOURCE_GROUP)
-      [ ! -f "$STUB_STATE_DIR/discovery" ] || exit 1
-      printf 'rg-testenv-abc12345-gateway' ;;
+      [ "${STUB_NO_GATEWAY_VALUES:-0}" = "0" ] || exit 1
+      printf '%s' "${STUB_RESOURCE_GROUP:-rg-tues-abc12345-gateway}"
+      ;;
     AI_GATEWAY_NAME)
-      [ ! -f "$STUB_STATE_DIR/discovery" ] || exit 1
-      printf 'aigw-abc12345' ;;
+      [ "${STUB_NO_GATEWAY_VALUES:-0}" = "0" ] || exit 1
+      printf '%s' "${STUB_GATEWAY_NAME:-aigw-abc12345}"
+      ;;
+    AI_GATEWAY_LOCATION) printf '%s' "${STUB_GATEWAY_LOCATION:-eastus2}" ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -32,424 +65,369 @@ STUB
 cat > "$stub_bin/az" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+
 state_dir="${STUB_STATE_DIR:?}"
-resource_id="/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-testenv-abc12345-gateway/providers/Microsoft.ApiManagement/aigateways/aigw-abc12345"
-printf '%s\n' "$*" >> "$state_dir/requests"
-state="$(cat "$state_dir/live" 2>/dev/null || true)"
-owner="$(cat "$state_dir/owner" 2>/dev/null || printf 'testenv')"
-sku="$(cat "$state_dir/sku" 2>/dev/null || printf 'Consumption')"
+subscription_id="${STUB_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000001}"
+environment_name="${STUB_ENVIRONMENT_NAME:-tues}"
+resource_group="${STUB_RESOURCE_GROUP:-rg-tues-abc12345-gateway}"
+gateway_name="${STUB_GATEWAY_NAME:-aigw-abc12345}"
+location="${STUB_GATEWAY_LOCATION:-eastus2}"
+
+read_state() {
+  local file="$state_dir/$1"
+  local default="$2"
+  if [ -f "$file" ]; then
+    cat "$file"
+  else
+    printf '%s' "$default"
+  fi
+}
+
+increment() {
+  local file="$state_dir/$1"
+  local value
+  value="$(read_state "$1" 0)"
+  printf '%s' $((value + 1)) > "$file"
+}
 
 if [ "${1:-}" = "account" ] && [ "${2:-}" = "show" ]; then
-  printf '00000000-0000-0000-0000-000000000001'
+  printf '%s\n' "$subscription_id"
   exit 0
 fi
 
 if [ "${1:-}" = "resource" ] && [ "${2:-}" = "list" ]; then
-  [[ "$*" == *"--resource-type Microsoft.ApiManagement/aigateways"* ]]
-  [[ "$*" == *"tags."*"azd-env-name"*"=='testenv'"*"sku.name=='Consumption'"* ]]
-  if [ -f "$state_dir/discovery-error" ]; then
-    echo "ERROR: (AuthorizationFailed) discovery denied" >&2
-    exit 1
-  fi
-  count="$(cat "$state_dir/discovery")"
-  if [[ "$*" == *"-o json"* ]]; then
-    python3 -c 'import json,sys; print(json.dumps([{"name":"aigw-abc12345","resourceGroup":"rg-testenv-abc12345-gateway"}]*int(sys.argv[1])))' "$count"
-  else
-    for ((i=0; i<count; i++)); do
-      printf 'aigw-abc12345\trg-testenv-abc12345-gateway\n'
-    done
+  if [ "$(read_state live 0)" = "1" ] && [ "${STUB_DISCOVERY_ENABLED:-0}" = "1" ]; then
+    printf '%s\t%s\t%s\n' "$gateway_name" "$resource_group" "$location"
   fi
   exit 0
 fi
 
-if [ "${1:-}" = "deployment" ]; then
-  if [ -f "$state_dir/deployment-error" ]; then
-    echo "ERROR: (AuthorizationFailed) deployment inspection denied" >&2
-    exit 1
+if [ "${1:-}" = "deployment" ] && [ "${2:-}" = "sub" ] && [ "${3:-}" = "list" ]; then
+  if [ -n "${STUB_FAILED_DEPLOYMENT:-}" ]; then
+    printf '%s\n' "$STUB_FAILED_DEPLOYMENT"
   fi
-  if [ "${2:-}" = sub ] && [ "${3:-}" = list ]; then
-    [[ "$*" == *"reverse(sort_by([?properties.provisioningState=='Failed'], &properties.timestamp))[:10]"* ]]
-  elif [ -f "$state_dir/operation-error" ]; then
-    echo "ERROR: (AuthorizationFailed) deployment operation inspection denied" >&2
-    exit 1
-  fi
-  python3 - "$state_dir" "$@" <<'PY'
-import json
-import pathlib
-import sys
-
-state = pathlib.Path(sys.argv[1])
-args = sys.argv[2:]
-subscription = "00000000-0000-0000-0000-000000000001"
-default_group = "rg-testenv-abc12345-gateway"
-def read(name, default):
-    path = state / name
-    return path.read_text() if path.exists() else default
-def operation(group, kind, name, status="Failed", code="DeploymentFailed"):
-    target_id = f"/subscriptions/{subscription}/resourceGroups/{group}/providers/{kind}/{name}"
-    if kind.lower() != "microsoft.resources/deployments":
-        target_id = read("operation-id", target_id)
-    return {"properties": {"provisioningState": status,
-        "targetResource": {"resourceType": kind, "id": target_id},
-        "statusMessage": {"error": {"code": code}}}}
-if args[1:3] == ["sub", "list"]:
-    result = [{"name": "root", "properties": {"provisioningState": read("deployment-state", "Failed")}}] if (state / "failed-discovery").exists() else []
-    if result and (state / "duplicate").exists():
-        result.append({"name": "previous-root", "properties": {"provisioningState": "Failed"}})
-elif args[1:4] == ["operation", "sub", "list"]:
-    result = [operation(read("operation-group", default_group), "Microsoft.Resources/deployments", "gateway-root")]
-    if (state / "ambiguous").exists():
-        result.append(operation("rg-testenv-ffff1111-gateway", "Microsoft.Resources/deployments", "gateway-root"))
-elif args[1:4] == ["operation", "group", "list"]:
-    group = args[args.index("--resource-group") + 1]
-    name = args[args.index("--name") + 1]
-    if (state / "nested").exists() and name == "gateway-root":
-        result = [operation(group, "Microsoft.Resources/deployments", "gateway-inner")]
-    elif (state / "too-deep").exists():
-        result = [operation(group, "Microsoft.Resources/deployments", name + "-inner")]
-    else:
-        token = group.split("-")[-2]
-        result = [operation(group, read("operation-type", "Microsoft.ApiManagement/aigateways"),
-            read("operation-name", "aigw-" + token), read("operation-state", "Failed"),
-            read("operation-code", "FailedIdentityOperation"))]
-else:
-    sys.exit(1)
-print(json.dumps(result))
-PY
-  exit $?
-fi
-
-if [ "${1:-}" = group ] && [ "${2:-}" = show ]; then
-  if [ -f "$state_dir/group-error" ]; then
-    echo "ERROR: (AuthorizationFailed) resource group inspection denied" >&2
-    exit 1
-  fi
-  printf '{"tags":{"azd-env-name":"%s"}}' "$(cat "$state_dir/group-owner" 2>/dev/null || printf 'testenv')"
   exit 0
 fi
 
-[ "${1:-}" = "rest" ] || exit 1
+if [ "${1:-}" = "deployment" ] && [ "${2:-}" = "operation" ] && [ "${3:-}" = "sub" ]; then
+  if [ -n "${STUB_FAILED_DEPLOYMENT:-}" ]; then
+    if [ "${STUB_NESTED_FAILURE:-0}" = "1" ]; then
+      printf '/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Resources/deployments/ai-gateway-test\n' \
+        "$subscription_id" "$resource_group"
+    else
+      printf '/subscriptions/%s/resourceGroups/%s/providers/Microsoft.ApiManagement/aigateways/%s\n' \
+        "$subscription_id" "$resource_group" "$gateway_name"
+    fi
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "deployment" ] && [ "${2:-}" = "operation" ] && [ "${3:-}" = "group" ]; then
+  printf '/subscriptions/%s/resourceGroups/%s/providers/Microsoft.ApiManagement/aigateways/%s\n' \
+    "$subscription_id" "$resource_group" "$gateway_name"
+  exit 0
+fi
+
+if [ "${1:-}" = "group" ] && [ "${2:-}" = "show" ]; then
+  printf '%s\n' "${STUB_GROUP_OWNER:-$environment_name}"
+  exit 0
+fi
+
+if [ "${1:-}" != "rest" ]; then
+  echo "unsupported az command: $*" >&2
+  exit 2
+fi
+
 method=""
 uri=""
+query=""
+shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --method) method="$2"; shift 2 ;;
     --uri) uri="$2"; shift 2 ;;
+    --query) query="$2"; shift 2 ;;
+    -o) shift 2 ;;
     *) shift ;;
   esac
 done
 
-# Fail unexpected resource paths, especially retired APIM soft-delete APIs.
-[ "$uri" = "https://management.azure.com${resource_id}?api-version=2025-09-01-preview" ] || exit 1
+case "$uri" in
+  *"/resourceGroups/${resource_group}/providers/Microsoft.ApiManagement/aigateways/${gateway_name}?"*)
+    if [ "$method" = "get" ]; then
+      if [ "$(read_state live 0)" != "1" ]; then
+        echo "Status Code: 404 ResourceNotFound" >&2
+        exit 1
+      fi
+      if [ -n "$query" ]; then
+        printf '%s|%s|%s|%s|%s\n' \
+          "$(read_state provisioning_state Succeeded)" \
+          "$(read_state sku Premium)" \
+          "$(read_state owner "$environment_name")" \
+          "$location" \
+          "$(read_state target_state null)"
+        if [ "$(read_state target_state null)" = "Deleting" ] &&
+          [ "${STUB_TRANSIENT_DELETE:-0}" = "1" ]; then
+          printf '0' > "$state_dir/live"
+        fi
+      fi
+      exit 0
+    fi
+    if [ "$method" = "delete" ]; then
+      if [ "${STUB_TRANSIENT_DELETE:-0}" = "1" ]; then
+        printf 'Succeeded' > "$state_dir/provisioning_state"
+        printf 'Deleting' > "$state_dir/target_state"
+      else
+        printf '0' > "$state_dir/live"
+      fi
+      increment delete_count
+      exit 0
+    fi
+    ;;
+esac
 
-if [ "$method" = "get" ]; then
-  if [ -f "$state_dir/poll-error" ] && [ ! -f "$state_dir/live" ]; then
-    echo "ERROR: (AuthorizationFailed) polling denied" >&2
-    exit 1
-  fi
-  if [ -z "$state" ]; then
-    echo "ERROR: (ResourceNotFound) 404" >&2
-    exit 1
-  fi
-  case "$state" in
-    Forbidden)
-      echo "ERROR: (AuthorizationFailed) 403 over scope ${resource_id}-404" >&2
-      exit 1 ;;
-    Unavailable)
-      echo "ERROR: (ServiceUnavailable) retry request 404 later" >&2
-      exit 1 ;;
-    Malformed) printf '{"sku":'; exit 0 ;;
-    Deleting) rm -f "$state_dir/live" ;;
-  esac
-  printf '{"sku":{"name":"%s"},"tags":{"azd-env-name":"%s"},"properties":{"provisioningState":"%s"}}' "$sku" "$owner" "$state"
-  exit 0
-fi
-
-if [ "$method" = "delete" ]; then
-  if [ -f "$state_dir/delete-error" ]; then
-    echo "ERROR: (AuthorizationFailed) delete denied" >&2
-    exit 1
-  fi
-  rm -f "$state_dir/live"
-  printf 'delete\n' >> "$state_dir/actions"
-  exit 0
-fi
-exit 1
+echo "unsupported az rest call: $method $uri" >&2
+exit 2
 STUB
 
-chmod +x "$stub_bin/azd" "$stub_bin/az"
+chmod +x "$stub_bin/az" "$stub_bin/azd"
+
+new_case() {
+  local name="$1"
+  case_dir="$temp_root/$name"
+  mkdir -p "$case_dir"
+  printf '0' > "$case_dir/live"
+  printf 'Premium' > "$case_dir/sku"
+  printf 'tues' > "$case_dir/owner"
+  printf 'Succeeded' > "$case_dir/provisioning_state"
+  output_file="$case_dir/output"
+  error_file="$case_dir/error"
+  marker_file="$case_dir/apim-lifecycle.state"
+}
 
 run_lifecycle() {
-  PATH="$stub_bin:$PATH" \
-  STUB_STATE_DIR="$state_dir" \
-  AZURE_ENV_NAME=testenv \
-  AZURE_SUBSCRIPTION_ID=00000000-0000-0000-0000-000000000001 \
-  AI_GATEWAY_NAME="${test_gateway_name:-}" AI_GATEWAY_RESOURCE_GROUP="${test_resource_group:-}" \
-  APIM_LIFECYCLE_POLL_SECONDS="${test_poll_seconds:-0}" \
-  APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS="${test_settle_seconds:-0}" \
-  APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS="${test_timeout_seconds:-10}" \
-    "${runner[@]}" "$1"
+  env \
+    PATH="$stub_bin:$PATH" \
+    STUB_STATE_DIR="$case_dir" \
+    AZURE_ENV_NAME=tues \
+    AZURE_SUBSCRIPTION_ID=00000000-0000-0000-0000-000000000001 \
+    AI_GATEWAY_RESOURCE_GROUP=rg-tues-abc12345-gateway \
+    AI_GATEWAY_NAME=aigw-abc12345 \
+    AI_GATEWAY_LOCATION=eastus2 \
+    APIM_LIFECYCLE_STATE_FILE="$marker_file" \
+    APIM_LIFECYCLE_POLL_INITIAL_SECONDS=0 \
+    APIM_LIFECYCLE_POLL_MAX_SECONDS=0 \
+    APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS="${TEST_SETTLE_SECONDS:-0}" \
+    APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS="${TEST_TIMEOUT_SECONDS:-2}" \
+    "$lifecycle_script" "$1" >"$output_file" 2>"$error_file"
 }
 
-reset_state() {
-  rm -f "$state_dir/"*
-  test_poll_seconds=0
-  test_settle_seconds=0
-  test_timeout_seconds=10
-  test_gateway_name=""
-  test_resource_group=""
+run_lifecycle_without_gateway_values() {
+  env \
+    PATH="$stub_bin:$PATH" \
+    STUB_STATE_DIR="$case_dir" \
+    STUB_NO_GATEWAY_VALUES=1 \
+    STUB_DISCOVERY_ENABLED="${STUB_DISCOVERY_ENABLED:-0}" \
+    STUB_FAILED_DEPLOYMENT="${STUB_FAILED_DEPLOYMENT:-}" \
+    STUB_NESTED_FAILURE="${STUB_NESTED_FAILURE:-0}" \
+    STUB_GROUP_OWNER="${STUB_GROUP_OWNER:-tues}" \
+    AZURE_ENV_NAME=tues \
+    AZURE_SUBSCRIPTION_ID=00000000-0000-0000-0000-000000000001 \
+    AI_GATEWAY_LOCATION=eastus2 \
+    APIM_LIFECYCLE_STATE_FILE="$marker_file" \
+    APIM_LIFECYCLE_POLL_INITIAL_SECONDS=0 \
+    APIM_LIFECYCLE_POLL_MAX_SECONDS=0 \
+    APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS=0 \
+    APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS=2 \
+    "$lifecycle_script" "$1" >"$output_file" 2>"$error_file"
 }
 
-setup_failed_discovery() {
-  reset_state
-  printf '0' > "$state_dir/discovery"
-  printf 'Failed' > "$state_dir/live"
-  touch "$state_dir/failed-discovery"
-}
+new_case fresh-environment
+run_lifecycle_without_gateway_values prepare
+[ ! -f "$marker_file" ] || fail "fresh environment created a lifecycle marker"
+assert_contains "$output_file" "no lifecycle cleanup is needed"
 
-expect_failure() {
-  if run_lifecycle "$1" >"$work_root/failure.out" 2>&1; then
-    echo "Expected $2 to fail ($platform)." >&2
-    exit 1
-  fi
-  grep -Fiq "$2" "$work_root/failure.out"
-  [ ! -f "$state_dir/actions" ]
-}
+new_case healthy-preserved
+printf '1' > "$case_dir/live"
+run_lifecycle prepare
+assert_file_value "$case_dir/live" 1
+[ ! -f "$case_dir/delete_count" ] || fail "healthy gateway was deleted"
+assert_contains "$output_file" "Preserving healthy environment-owned AI Gateway"
 
-for platform in bash pwsh; do
-  if [ "$platform" = "pwsh" ]; then
-    if ! command -v pwsh >/dev/null; then
-      echo "Skipping PowerShell lifecycle tests: pwsh is not installed."
-      continue
-    fi
-    runner=(pwsh -NoLogo -NoProfile -File "$repo_root/infra/scripts/manage-ai-gateway-lifecycle.ps1")
-  else
-    runner=(bash "$repo_root/infra/scripts/manage-ai-gateway-lifecycle.sh")
-  fi
+new_case failed-owned-discovered
+printf '1' > "$case_dir/live"
+printf 'Failed' > "$case_dir/provisioning_state"
+STUB_DISCOVERY_ENABLED=1
+export STUB_DISCOVERY_ENABLED
+run_lifecycle_without_gateway_values prepare
+unset STUB_DISCOVERY_ENABLED
+assert_file_value "$case_dir/live" 0
+assert_file_value "$case_dir/delete_count" 1
+assert_contains "$output_file" "Recovering terminal-Failed"
 
-  reset_state
-  printf 'Succeeded' > "$state_dir/live"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "Preserving healthy" <<< "$output"
-  [ ! -f "$state_dir/actions" ]
+new_case failed-owned
+printf '1' > "$case_dir/live"
+printf 'Failed' > "$case_dir/provisioning_state"
+run_lifecycle prepare
+assert_file_value "$case_dir/live" 0
+assert_file_value "$case_dir/delete_count" 1
+assert_contains "$marker_file" "state=settled"
+assert_contains "$output_file" "Recovering terminal-Failed"
 
-  for mode in prepare cleanup; do
-    reset_state
-    if [ "$mode" = prepare ]; then
-      printf 'Failed' > "$state_dir/live"
-    else
-      printf 'Succeeded' > "$state_dir/live"
-    fi
-    output="$(run_lifecycle "$mode")"
-    grep -Fq "identity settle window completed" <<< "$output"
-    [ "$(cat "$state_dir/actions")" = delete ]
-    ! grep -Fiq deletedservices "$state_dir/requests"
-    grep -Fq 'If-Match=*' "$state_dir/requests"
-  done
+new_case failed-owned-deleting-transition
+printf '1' > "$case_dir/live"
+printf 'Failed' > "$case_dir/provisioning_state"
+STUB_TRANSIENT_DELETE=1
+export STUB_TRANSIENT_DELETE
+run_lifecycle prepare
+unset STUB_TRANSIENT_DELETE
+assert_file_value "$case_dir/live" 0
+assert_file_value "$case_dir/delete_count" 1
+assert_contains "$output_file" "Waiting for AI Gateway aigw-abc12345 to finish deleting"
+assert_contains "$marker_file" "state=settled"
 
-  reset_state
-  printf 'Deleting' > "$state_dir/live"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "identity settle window completed" <<< "$output"
-  [ ! -f "$state_dir/actions" ]
+new_case already-deleting
+printf '1' > "$case_dir/live"
+printf 'Succeeded' > "$case_dir/provisioning_state"
+printf 'Deleting' > "$case_dir/target_state"
+STUB_TRANSIENT_DELETE=1
+export STUB_TRANSIENT_DELETE
+run_lifecycle prepare
+unset STUB_TRANSIENT_DELETE
+[ ! -f "$case_dir/delete_count" ] || fail "already-deleting gateway received another DELETE"
+assert_file_value "$case_dir/live" 0
+assert_contains "$output_file" "Waiting for environment-owned AI Gateway"
+assert_contains "$marker_file" "state=settled"
 
-  reset_state
-  output="$(run_lifecycle cleanup)"
-  grep -Fq "identity settle window completed" <<< "$output"
-  [ ! -f "$state_dir/actions" ]
-  ! grep -Fiq deletedservices "$state_dir/requests"
+new_case postdown-already-deleting
+printf '1' > "$case_dir/live"
+printf 'Succeeded' > "$case_dir/provisioning_state"
+printf 'Deleting' > "$case_dir/target_state"
+STUB_TRANSIENT_DELETE=1
+export STUB_TRANSIENT_DELETE
+run_lifecycle cleanup
+unset STUB_TRANSIENT_DELETE
+[ ! -f "$case_dir/delete_count" ] || fail "postdown sent another DELETE to an already-deleting gateway"
+assert_file_value "$case_dir/live" 0
+assert_contains "$output_file" "Waiting for environment-owned AI Gateway"
+assert_contains "$marker_file" "state=settled"
 
-  reset_state
-  printf 'Failed' > "$state_dir/live"
-  printf 'another-env' > "$state_dir/owner"
-  expect_failure prepare "refusing resource tagged"
-  printf '' > "$state_dir/owner"
-  expect_failure cleanup "refusing resource tagged"
-  printf 'testenv' > "$state_dir/owner"
-  for sku in AIGateway Developer; do
-    printf '%s' "$sku" > "$state_dir/sku"
-    expect_failure cleanup "refusing resource with SKU"
-  done
+new_case mismatched-ownership
+printf '1' > "$case_dir/live"
+printf 'Failed' > "$case_dir/provisioning_state"
+printf 'another-environment' > "$case_dir/owner"
+if run_lifecycle prepare; then
+  fail "mismatched ownership was accepted"
+fi
+[ ! -f "$case_dir/delete_count" ] || fail "mismatched gateway was deleted"
+assert_contains "$error_file" "expected azd-env-name=tues"
 
-  reset_state
-  printf 'Updating' > "$state_dir/live"
-  expect_failure prepare "nonterminal state"
+new_case postdown-delete
+printf '1' > "$case_dir/live"
+run_lifecycle cleanup
+assert_file_value "$case_dir/live" 0
+assert_file_value "$case_dir/delete_count" 1
+assert_contains "$marker_file" "state=settled"
 
-  reset_state
-  printf 'Succeeded' > "$state_dir/live"
-  printf 'Failed' > "$state_dir/deployment-state"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "Preserving healthy" <<< "$output"
-  [ ! -f "$state_dir/actions" ]
-  ! grep -Fq 'deployment ' "$state_dir/requests"
+new_case recent-identity-failure
+STUB_FAILED_DEPLOYMENT=tues-failed-deployment
+export STUB_FAILED_DEPLOYMENT
+run_lifecycle_without_gateway_values prepare
+unset STUB_FAILED_DEPLOYMENT
+assert_contains "$marker_file" "failure_id=tues-failed-deployment:"
+assert_contains "$marker_file" "state=settled"
 
-  for state in Forbidden Unavailable; do
-    printf '%s' "$state" > "$state_dir/live"
-    expect_failure prepare "Azure REST GET failed"
-  done
-  printf 'Malformed' > "$state_dir/live"
-  if run_lifecycle cleanup >"$work_root/failure.out" 2>&1; then
-    echo "Expected malformed JSON to fail closed ($platform)." >&2
-    exit 1
-  fi
-  [ ! -f "$state_dir/actions" ]
+new_case unowned-recent-failure
+STUB_FAILED_DEPLOYMENT=tues-unowned-failed-deployment
+STUB_GROUP_OWNER=another-environment
+export STUB_FAILED_DEPLOYMENT STUB_GROUP_OWNER
+if run_lifecycle_without_gateway_values prepare; then
+  fail "mismatched failed-deployment ownership was accepted"
+fi
+unset STUB_FAILED_DEPLOYMENT STUB_GROUP_OWNER
+[ ! -f "$marker_file" ] || fail "unowned failure created a lifecycle marker"
+assert_contains "$error_file" "resource group is tagged for azd environment another-environment"
 
-  reset_state
-  printf 'Failed' > "$state_dir/live"
-  touch "$state_dir/delete-error"
-  expect_failure prepare "delete denied"
+new_case nested-recent-identity-failure
+STUB_FAILED_DEPLOYMENT=tues-nested-failed-deployment
+STUB_NESTED_FAILURE=1
+export STUB_FAILED_DEPLOYMENT STUB_NESTED_FAILURE
+run_lifecycle_without_gateway_values prepare
+unset STUB_FAILED_DEPLOYMENT STUB_NESTED_FAILURE
+assert_contains "$marker_file" "failure_id=tues-nested-failed-deployment:"
+assert_contains "$marker_file" "Microsoft.Resources/deployments/ai-gateway-test"
+assert_contains "$marker_file" "state=settled"
 
-  reset_state
-  touch "$state_dir/poll-error"
-  expect_failure cleanup "Azure REST GET failed"
+new_case empty-postdown
+run_lifecycle_without_gateway_values cleanup
+[ ! -f "$marker_file" ] || fail "empty postdown created a lifecycle marker"
+assert_contains "$output_file" "no lifecycle cleanup is needed"
 
-  reset_state
-  printf 'Failed' > "$state_dir/live"
-  touch "$state_dir/poll-error"
-  if run_lifecycle prepare >"$work_root/failure.out" 2>&1; then
-    echo "Expected authorization failure during deletion polling to fail ($platform)." >&2
-    exit 1
-  fi
-  grep -Fq "Azure REST GET failed" "$work_root/failure.out"
-  [ "$(cat "$state_dir/actions")" = delete ]
+new_case settle-exhausted
+cat > "$marker_file" <<'MARKER'
+version=1
+environment_name=tues
+subscription_id=00000000-0000-0000-0000-000000000001
+resource_group=rg-tues-abc12345-gateway
+gateway_name=aigw-abc12345
+location=eastus2
+state=ready
+action_epoch=0
+failure_id=
+MARKER
+TEST_SETTLE_SECONDS=30 TEST_TIMEOUT_SECONDS=0
+export TEST_SETTLE_SECONDS TEST_TIMEOUT_SECONDS
+if run_lifecycle prepare; then
+  fail "identity settle exhaustion reported success"
+fi
+unset TEST_SETTLE_SECONDS TEST_TIMEOUT_SECONDS
+assert_contains "$error_file" "cleanup did not remain quiet"
+assert_contains "$error_file" "rerun 'azd provision'"
+assert_contains "$error_file" "run 'azd down'"
+assert_contains "$marker_file" "state=pending"
 
-  for count in 0 1 2; do
-    reset_state
-    printf '%s' "$count" > "$state_dir/discovery"
-    printf 'Succeeded' > "$state_dir/live"
-    if [ "$count" = 2 ]; then
-      expect_failure prepare "multiple AI Gateways"
-    else
-      output="$(run_lifecycle prepare)"
-      if [ "$count" = 0 ]; then
-        grep -Fq "No environment-owned" <<< "$output"
-        ! grep -Fq 'rest ' "$state_dir/requests"
-        grep -Fq 'deployment sub list' "$state_dir/requests"
-      else
-        grep -Fq "Preserving healthy" <<< "$output"
-      fi
-      [ ! -f "$state_dir/actions" ]
-    fi
-  done
-
-  reset_state
-  printf '1' > "$state_dir/discovery"
-  touch "$state_dir/discovery-error"
-  expect_failure prepare "discovery denied"
-
-  for code in FailedIdentityOperation ActivationFailed; do
-    setup_failed_discovery
-    printf '%s' "$code" > "$state_dir/operation-code"
-    touch "$state_dir/nested"
-    output="$(run_lifecycle prepare)"
-    grep -Fq "identity settle window completed" <<< "$output"
-    [ "$(cat "$state_dir/actions")" = delete ]
-    grep -Fq -- '--name gateway-inner' "$state_dir/requests"
-    grep -Fq 'group show' "$state_dir/requests"
-    ! grep -Fiq deletedservices "$state_dir/requests"
-  done
-
-  setup_failed_discovery
-  printf 'mIcRoSoFt.ApImAnAgEmEnT/aIgAtEwAyS' > "$state_dir/operation-type"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "identity settle window completed" <<< "$output"
-  [ "$(cat "$state_dir/actions")" = delete ]
-
-  setup_failed_discovery
-  touch "$state_dir/duplicate"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "identity settle window completed" <<< "$output"
-  [ "$(cat "$state_dir/actions")" = delete ]
-  [ "$(grep -c 'deployment operation group list' "$state_dir/requests")" -eq 1 ]
-
-  for hint in name group; do
-    setup_failed_discovery
-    if [ "$hint" = name ]; then
-      test_gateway_name=aigw-foreign1
-    else
-      test_resource_group=rg-testenv-foreign1-gateway
-    fi
-    output="$(run_lifecycle prepare)"
-    grep -Fq "No environment-owned" <<< "$output"
-    [ ! -f "$state_dir/actions" ]
-    ! grep -Fq 'rest ' "$state_dir/requests"
-  done
-
-  for type in Microsoft.ApiManagement/service Microsoft.ApiManagement/aigateways/workspaces; do
-    setup_failed_discovery
-    printf '%s' "$type" > "$state_dir/operation-type"
-    output="$(run_lifecycle prepare)"
-    grep -Fq "No environment-owned" <<< "$output"
-    [ ! -f "$state_dir/actions" ]
-    ! grep -Fq 'rest ' "$state_dir/requests"
-  done
-
-  for fixture in operation-code operation-state operation-name operation-group operation-id deployment-state; do
-    setup_failed_discovery
-    case "$fixture" in
-      operation-code) value=UnrelatedFailure ;;
-      operation-state) value=Succeeded ;;
-      operation-name) value=aigw-other123 ;;
-      operation-group) value=rg-anotherenv-abc12345-gateway ;;
-      operation-id) value=/subscriptions/other/resourceGroups/rg-testenv-abc12345-gateway/providers/Microsoft.ApiManagement/aigateways/aigw-abc12345 ;;
-      deployment-state) value=Running ;;
-    esac
-    printf '%s' "$value" > "$state_dir/$fixture"
-    output="$(run_lifecycle prepare)"
-    grep -Fq "No environment-owned" <<< "$output"
-    [ ! -f "$state_dir/actions" ]
-    ! grep -Fq 'rest ' "$state_dir/requests"
-  done
-
-  setup_failed_discovery
-  touch "$state_dir/ambiguous"
-  expect_failure prepare "multiple AI Gateways"
-
-  for owner in another-env ''; do
-    setup_failed_discovery
-    printf '%s' "$owner" > "$state_dir/group-owner"
-    expect_failure prepare "refusing failed deployment resource group"
-    ! grep -Fq 'rest ' "$state_dir/requests"
-  done
-
-  setup_failed_discovery
-  printf 'another-env' > "$state_dir/owner"
-  expect_failure prepare "refusing resource tagged"
-  printf 'testenv' > "$state_dir/owner"
-  printf 'Developer' > "$state_dir/sku"
-  expect_failure prepare "refusing resource with SKU"
-
-  for fixture in deployment-error operation-error group-error; do
-    setup_failed_discovery
-    touch "$state_dir/$fixture"
-    expect_failure prepare "inspection denied"
-  done
-
-  setup_failed_discovery
-  touch "$state_dir/too-deep"
-  expect_failure prepare "safe traversal limit"
-
-  setup_failed_discovery
-  printf 'Succeeded' > "$state_dir/live"
-  output="$(run_lifecycle prepare)"
-  grep -Fq "Preserving healthy" <<< "$output"
-  [ ! -f "$state_dir/actions" ]
-
-  setup_failed_discovery
-  printf 'Updating' > "$state_dir/live"
-  expect_failure prepare "nonterminal state"
-
-  reset_state
-  test_settle_seconds=1
-  test_poll_seconds=1
-  output="$(run_lifecycle cleanup)"
-  grep -Fq "Waiting for managed-identity cleanup" <<< "$output"
-  grep -Fq "1s identity settle window completed" <<< "$output"
-  [ "$(grep -c 'rest --method get' "$state_dir/requests")" -ge 3 ]
-
-  reset_state
-  test_timeout_seconds=0
-  expect_failure cleanup "cleanup did not settle"
-
-  echo "AI Gateway lifecycle tests passed ($platform)."
+for token in \
+  "2025-09-01-preview" \
+  "Microsoft.ApiManagement/aigateways" \
+  "Premium" \
+  "azd-env-name" \
+  "FailedIdentityOperation" \
+  "ActivationFailed" \
+  "If-Match=*" \
+  "APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS" \
+  "APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS"; do
+  assert_contains "$lifecycle_script" "$token"
+  assert_contains "$powershell_script" "$token"
 done
+for legacy_contract in \
+  "Microsoft.ApiManagement/service" \
+  "deletedservices" \
+  "AIGateway"; do
+  assert_not_contains "$lifecycle_script" "$legacy_contract"
+  assert_not_contains "$powershell_script" "$legacy_contract"
+done
+
+assert_contains "$repo_root/azure.yaml" "postdown:"
+assert_contains "$repo_root/azure.yaml" "manage-ai-gateway-lifecycle.sh cleanup"
+assert_contains "$repo_root/azure.yaml" "manage-ai-gateway-lifecycle.ps1 cleanup"
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.sh" "manage-ai-gateway-lifecycle.sh\" prepare"
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.ps1" "manage-ai-gateway-lifecycle.ps1\") prepare"
+for postprovision_script in \
+  "$repo_root/infra/scripts/configure-ai-gateway.sh" \
+  "$repo_root/infra/scripts/configure-ai-gateway.ps1"; do
+  assert_contains "$postprovision_script" "Microsoft.ApiManagement/aigateways"
+  assert_contains "$postprovision_script" "Microsoft.ApiManagement/service"
+  assert_contains "$postprovision_script" "frontend.defaultHostname"
+  assert_contains "$postprovision_script" "/default/models/openai/v1/chat/completions"
+  assert_contains "$postprovision_script" "contentSafety"
+  assert_contains "$postprovision_script" "hateSeverity"
+  assert_contains "$postprovision_script" "selfHarmSeverity"
+  assert_contains "$postprovision_script" "sexualSeverity"
+  assert_contains "$postprovision_script" "violenceSeverity"
+  assert_contains "$postprovision_script" "Medium"
+done
+
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.sh" '"policies": [{'
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.ps1" 'policies = @('
+
+echo "APIM lifecycle tests passed."

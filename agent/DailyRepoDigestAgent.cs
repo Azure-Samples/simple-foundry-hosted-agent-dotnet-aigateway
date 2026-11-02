@@ -1,3 +1,5 @@
+using Azure.Core;
+using Azure.Identity;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using OpenAI;
@@ -9,6 +11,7 @@ namespace RepoDigestAgent;
 
 internal static class DailyRepoDigestAgent
 {
+    internal const string AiGatewayTokenScope = "https://azure-api.net/aigateway/.default";
     private const string DefaultRepository = "microsoft/agent-framework";
     private const string DefaultGatewayModel = "gpt-latest";
     private const string DefaultToolboxName = "repo-digest-tools";
@@ -18,10 +21,19 @@ internal static class DailyRepoDigestAgent
     internal static string ToolboxName(IConfiguration configuration) =>
         configuration["TOOLBOX_NAME"] ?? DefaultToolboxName;
 
-    internal static AIAgent Build(IConfiguration configuration)
+    internal static DefaultAzureCredential CreateAzureCredential(IConfiguration configuration) =>
+        new(new DefaultAzureCredentialOptions
+        {
+            ExcludeManagedIdentityCredential =
+                string.IsNullOrWhiteSpace(configuration["FOUNDRY_HOSTING_ENVIRONMENT"])
+        });
+
+    internal static AIAgent Build(
+        IConfiguration configuration,
+        TokenCredential? credential = null)
     {
         var repository = ConfiguredRepository(configuration);
-        return GatewayClient(configuration)
+        return GatewayClient(configuration, credential)
             .AsAIAgent(new ChatClientAgentOptions
             {
                 Name = "daily-repo-digest",
@@ -83,21 +95,27 @@ internal static class DailyRepoDigestAgent
                 "Set GITHUB_REPOSITORY in owner/repository format.");
     }
 
-    private static ChatClient GatewayClient(IConfiguration configuration)
+    internal static ChatClient GatewayClient(
+        IConfiguration configuration,
+        TokenCredential? credential = null,
+        PipelineTransport? transport = null)
     {
-        var apiKey = RequiredValue(configuration, "AZURE_AI_GATEWAY_API_KEY");
+        var apiKey = configuration["AZURE_AI_GATEWAY_API_KEY"];
         var options = new OpenAIClientOptions
         {
             Endpoint = new Uri(
                 $"{RequiredValue(configuration, "AZURE_AI_GATEWAY_ENDPOINT").TrimEnd('/')}/default/models/openai/v1/")
         };
+        if (transport is not null)
+        {
+            options.Transport = transport;
+        }
 
-        // AI Gateway authenticates with Api-Key, while the OpenAI client requires a credential.
         options.AddPolicy(
-            ApiKeyAuthenticationPolicy.CreateHeaderApiKeyPolicy(
-                new ApiKeyCredential(apiKey),
-                "Api-Key"),
-            PipelinePosition.PerCall);
+            !string.IsNullOrWhiteSpace(apiKey)
+                ? new GatewayApiKeyPolicy(apiKey)
+                : new GatewayBearerTokenPolicy(credential ?? CreateAzureCredential(configuration)),
+            PipelinePosition.BeforeTransport);
 
         return new OpenAIClient(
                 new ApiKeyCredential(OpenAiAuthPlaceholder),
@@ -109,4 +127,58 @@ internal static class DailyRepoDigestAgent
         configuration[name] is { Length: > 0 } value
             ? value
             : throw new InvalidOperationException($"Set {name}.");
+
+    private sealed class GatewayApiKeyPolicy(string apiKey) : PipelinePolicy
+    {
+        public override void Process(
+            PipelineMessage message,
+            IReadOnlyList<PipelinePolicy> pipeline,
+            int currentIndex)
+        {
+            ApplyHeaders(message);
+            ProcessNext(message, pipeline, currentIndex);
+        }
+
+        public override ValueTask ProcessAsync(
+            PipelineMessage message,
+            IReadOnlyList<PipelinePolicy> pipeline,
+            int currentIndex)
+        {
+            ApplyHeaders(message);
+            return ProcessNextAsync(message, pipeline, currentIndex);
+        }
+
+        private void ApplyHeaders(PipelineMessage message)
+        {
+            message.Request.Headers.Remove("Authorization");
+            message.Request.Headers.Set("Api-Key", apiKey);
+        }
+    }
+
+    private sealed class GatewayBearerTokenPolicy(TokenCredential credential) : PipelinePolicy
+    {
+        private static readonly TokenRequestContext ScopeContext = new([AiGatewayTokenScope]);
+
+        public override void Process(
+            PipelineMessage message,
+            IReadOnlyList<PipelinePolicy> pipeline,
+            int currentIndex)
+        {
+            var token = credential.GetToken(ScopeContext, message.CancellationToken);
+            message.Request.Headers.Set("Authorization", $"Bearer {token.Token}");
+            ProcessNext(message, pipeline, currentIndex);
+        }
+
+        public override async ValueTask ProcessAsync(
+            PipelineMessage message,
+            IReadOnlyList<PipelinePolicy> pipeline,
+            int currentIndex)
+        {
+            var token = await credential
+                .GetTokenAsync(ScopeContext, message.CancellationToken)
+                .ConfigureAwait(false);
+            message.Request.Headers.Set("Authorization", $"Bearer {token.Token}");
+            await ProcessNextAsync(message, pipeline, currentIndex).ConfigureAwait(false);
+        }
+    }
 }

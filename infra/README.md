@@ -1,44 +1,68 @@
 # Infrastructure
 
-[`main.bicep`](main.bicep) is the subscription-scoped entry point. It creates three environment-tagged resource groups and composes:
+Run the commands in this README from the `infra/` directory.
 
-| Module | Responsibility |
-| --- | --- |
-| [AI Gateway](ai-gateway/README.md) | Standalone Consumption gateway, model catalog and aliases, telemetry, ToolServers, and runtime key |
-| [Foundry models](foundry-models/README.md) | Dedicated AI Services account and backing model deployments |
-| [Foundry agents](foundry-agents/README.md) | Foundry project, storage, container registry, connections, and agent monitoring |
-| [Deployment scripts](scripts/README.md) | Lifecycle safety, GitHub ToolServer configuration, route readiness, and Toolbox setup |
+The subscription-scoped [`main.bicep`](main.bicep) template creates three
+resource groups and deploys one module into each:
 
-[`main.parameters.json`](main.parameters.json) supplies azd parameters. [`toolbox.yaml`](toolbox.yaml) defines the read-only `aigw-github` MCP connection.
+- [`foundry-models/`](foundry-models/README.md) creates a model-only Azure AI
+  Services account and the GPT deployments.
+- [`foundry-agents/`](foundry-agents/README.md) creates the Foundry project and
+  hosted-agent runtime dependencies.
+- [`ai-gateway/`](ai-gateway/README.md) creates AI Gateway, model registrations,
+  and aliases.
 
-The agent continues to request `gpt-latest`. Gateway routing provides the primary `gpt-6-1-sol` deployment with `gpt-6-sol` and `gpt-5-4-mini` fallbacks. `gpt-mini-latest` selects the mini deployment directly. Override `modelAliasBackends` to change the primary chain.
+The [`scripts/`](scripts/README.md) directory contains the preprovision,
+postprovision, and postdown lifecycle hooks. `azd provision` runs the
+preprovision and postprovision hooks from `azure.yaml`; postprovision configures
+the GitHub MCP ToolServer and Foundry Toolbox after Bicep creates the Azure
+resources.
 
-Provision with `azd up` from the repository root. Deployment outputs feed the hooks and existing .NET environment variables. Public networking is enabled for this quickstart; review private networking and credential scope before production use.
+## AI Gateway policies
 
-## Standalone deployment
+By default, each model has a `tokenLimit` of 1,000 tokens per minute per unit
+of deployment capacity (20,000 for `gpt-latest` and `gpt-6-sol`; 200,000 for
+`gpt-mini-latest`), a `$10.00/month` `costLimit` per caller identity
+(`monthly-caller-budget`), and `Medium` `contentSafety` thresholds for Hate,
+Self-Harm, Sexual, and Violence. The same content-safety thresholds are applied
+to the `toolServers/github` MCP server. The `gpt-latest` alias fails over across
+`gpt-6.1-sol` (priority 0), `gpt-6-sol` (priority 1), and `gpt-5.4-mini`
+(priority 2). See the [AI Gateway module README](ai-gateway/README.md) for
+module usage and configuration.
 
-Run examples from the repository root after signing in with `az login`. The entry point is subscription-scoped:
+## Deploy the full stack
+
+`azd provision` also works from `infra/`: azd walks up to find
+[`../azure.yaml`](../azure.yaml), then provisions the full stack and runs its
+preprovision and postprovision hooks:
 
 ```bash
-az deployment sub create --location eastus2 \
-  --template-file infra/main.bicep \
-  --parameters environmentName=dailydigest location=eastus2
+azd provision
 ```
 
-Only `location` is required; other entry-point parameters have defaults. Choose regions with the required model availability and quota. To change the primary chain, pass `modelAliasBackends` as an array of `{modelArmName, priority, weight}` objects referencing registered catalog names.
-
-Individual modules use `az deployment group create` against an existing resource group; see their examples. Direct Azure CLI deployments return ARM outputs but do not populate azd configuration, run lifecycle/configuration hooks, deploy the agent image, or create the Toolbox. Use `azd up` for the integrated sample.
-
-## Live smoke check
-
-With Azure CLI and azd authenticated and an azd environment selected:
+Alternatively, deploy the subscription-scoped Bicep template directly:
 
 ```bash
-bash tests/test-azd-smoke.sh          # Invoke the existing hosted agent
-bash tests/test-azd-smoke.sh --deploy # Opt in to azd deploy, then invoke
-bash tests/test-azd-smoke.sh --up     # Opt in to azd up --no-prompt, then invoke
+az deployment sub create \
+  --location eastus2 \
+  --template-file ./main.bicep \
+  --parameters environmentName=dailydigest \
+               location=eastus2 \
+               principalId="$(az ad signed-in-user show --query id -o tsv)"
 ```
 
-These are live Azure operations, not offline tests. `--up` also needs the GitHub credential used by provisioning. The smoke check verifies a digest response, not actual backend failover.
+The direct deployment creates the Azure resources but does not run azd hooks.
+For GitHub MCP and Toolbox setup after a direct deployment, see
+[`scripts/README.md`](scripts/README.md) and provide the deployment outputs to
+the configuration script.
 
-See [implementation notes](../docs/implementation-notes.md) for runtime contracts and security boundaries.
+## Deploy individual modules
+
+Each resource-group-scoped template can also be deployed independently. Create
+its resource group first, then follow the module-specific parameters and
+examples:
+
+- [Foundry model account and deployments](foundry-models/README.md)
+- [Foundry project and hosted-agent runtime](foundry-agents/README.md)
+- [AI Gateway and model routing](ai-gateway/README.md)
+- [Lifecycle and postprovision scripts](scripts/README.md)

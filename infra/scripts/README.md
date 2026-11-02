@@ -1,46 +1,62 @@
-# Deployment hooks
+# Infrastructure scripts
 
-The Bash and PowerShell implementations support the same azd provisioning flow.
+The scripts provide azd lifecycle hooks for safely recovering the AI Gateway
+and finishing setup that requires a local GitHub credential. `azure.yaml`
+invokes the matching PowerShell scripts on Windows and Bash scripts on POSIX.
+Run the commands in this README from the `infra/scripts/` directory.
 
-## Lifecycle
+## Gateway lifecycle
 
-`manage-ai-gateway-lifecycle.sh` and `.ps1` support `prepare` and `cleanup`:
+[`manage-ai-gateway-lifecycle.sh`](manage-ai-gateway-lifecycle.sh) and
+[`manage-ai-gateway-lifecycle.ps1`](manage-ai-gateway-lifecycle.ps1) have two
+modes:
 
-- Use exact gateway outputs when available; otherwise discover a unique environment-tagged `Microsoft.ApiManagement/aigateways` resource with `Consumption` SKU.
-- Validate environment ownership and SKU before deleting.
-- Preserve healthy gateways during preprovision; remove terminal failed gateways or wait for an in-progress deletion.
-- If outputs are incomplete and live discovery finds nothing, inspect the 10 most recent failed subscription deployments and failed nested resource-group deployment operations, with depth 3 and 30 nested-deployment limits.
-- Recover only an exact standalone gateway target with `FailedIdentityOperation` or `ActivationFailed`, matching the subscription, supplied naming hints or environment naming/token, and resource-group ownership tag. Reject ambiguous candidates and unsafe traversal.
-- Recheck live ownership and SKU before any deletion; nonterminal live states still fail closed.
-- Wait for deletion and managed identity cleanup within bounded time limits.
-- Treat only confirmed 404 responses as absence and fail closed on other Azure errors.
+- `prepare` is used before provisioning. It only recovers an environment-owned
+  AI Gateway in a terminal failed state and waits for its managed-identity
+  cleanup.
+- `cleanup` completes an explicit teardown/recovery operation and waits for the
+  Gateway resource and identity cleanup. The azd `postdown` hook invokes this
+  after `azd down`.
 
-Cleanup does not purge legacy APIM `deletedservices` records. A recovered gateway that is already absent still receives the identity settle wait. Failed-operation discovery does not authorize deleting a healthy or nonterminal live gateway.
-
-## Configuration
-
-`configure-ai-gateway.sh` and `.ps1` prepare legacy script-owned role assignments for Bicep adoption and, after provisioning:
-
-1. Verify the standalone gateway and its managed-identity Foundry provider.
-2. Obtain the active GitHub CLI credential, optionally selected with `GITHUB_MCP_GH_USER`.
-3. Run advisory repository access checks and configure the GitHub ToolServer.
-4. Read the runtime key and probe the model route using `Api-Key`.
-5. Create or update the Foundry remote-tool connection and ensure the Toolbox exists.
-6. Save the existing runtime configuration to the azd environment without printing secrets.
-
-The ToolServer uses `failureMode: failClosed`, `X-MCP-Readonly: true`, and the allowlist `list_pull_requests,list_issues,actions_list`. The agent independently enforces the configured repository.
-
-Use a dedicated read-only GitHub credential. See [credential guidance](../../docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege) and [implementation notes](../../docs/implementation-notes.md#provisioning-hooks).
-
-## Run explicitly
-
-Prefer `azd up`, which sequences the hooks. For an already selected and configured azd environment, run from the repository root:
+Standalone usage:
 
 ```bash
-bash infra/scripts/configure-ai-gateway.sh --prepare-bicep # Before provisioning
-bash infra/scripts/configure-ai-gateway.sh                # After provisioning
+bash ./manage-ai-gateway-lifecycle.sh prepare
+bash ./manage-ai-gateway-lifecycle.sh cleanup
 ```
 
-The preparation command includes lifecycle `prepare`. Lifecycle `cleanup` is destructive and belongs to the teardown flow. These scripts require authenticated Azure CLI and azd, current deployment outputs, and, for postprovision configuration, authenticated GitHub CLI. A standalone module deployment returns ARM outputs but does not run these scripts or populate their azd inputs.
+On Windows, use `./manage-ai-gateway-lifecycle.ps1 prepare` or
+`./manage-ai-gateway-lifecycle.ps1 cleanup`. Polling intervals and the overall
+bound can be adjusted with
+`APIM_LIFECYCLE_POLL_INITIAL_SECONDS`,
+`APIM_LIFECYCLE_POLL_MAX_SECONDS`,
+`APIM_LIFECYCLE_IDENTITY_SETTLE_SECONDS`, and
+`APIM_LIFECYCLE_OPERATION_TIMEOUT_SECONDS`.
 
-Use `bash tests/test-azd-smoke.sh` to invoke an existing hosted agent. Opt-in `--deploy` and `--up` first deploy the agent or provision the full sample respectively. These require live Azure authentication and a selected azd environment; a successful digest is not proof of actual model failover.
+## Postprovision Gateway configuration
+
+[`configure-ai-gateway.sh`](configure-ai-gateway.sh) and
+[`configure-ai-gateway.ps1`](configure-ai-gateway.ps1) have two uses:
+
+- The `--prepare-bicep` mode runs lifecycle `prepare` and prepares the Gateway
+  role assignment before Bicep provisioning. `azure.yaml` calls this from its
+  preprovision hook.
+- The default mode runs after provisioning. It retrieves `apiKeys/default`,
+  registers the read-only GitHub MCP endpoint as the Gateway
+  `toolServers/github`, creates the `aigw-github` project connection, and creates
+  the Foundry Toolbox `repo-digest-tools`.
+
+`azd provision` runs these hooks automatically; azd finds the repository's
+`../../azure.yaml` when invoked from `infra/scripts/`. To run the postprovision
+step manually after deploying the resources:
+
+```bash
+bash ./configure-ai-gateway.sh
+```
+
+Use `./configure-ai-gateway.ps1` on Windows. The configuration
+step needs Azure CLI and azd access to the deployment, a GitHub CLI login
+(`gh auth login`) or `GH_TOKEN`, and the provisioned Gateway, Foundry project,
+and endpoint settings in the azd environment. The script verifies the Gateway
+model route before saving the runtime key and creating the Toolbox connection.
+It does not print or store the GitHub credential in Bicep outputs.

@@ -42,13 +42,10 @@ endpoint="$(require_azd_value AZURE_AI_GATEWAY_ENDPOINT)"
 key="$(require_azd_value AZURE_AI_GATEWAY_API_KEY)"
 model="$(require_azd_value AZURE_AI_GATEWAY_MODEL)"
 mini_model="$(require_azd_value AZURE_AI_GATEWAY_MINI_MODEL)"
-tenant_id="$(require_azd_value AZURE_TENANT_ID)"
-project_id="$(require_azd_value AZURE_AI_PROJECT_ID)"
 toolbox_endpoint="$(require_azd_value TOOLBOX_ENDPOINT)"
 toolbox_name="$(require_azd_value TOOLBOX_NAME)"
 repository="$(azd_value GITHUB_REPOSITORY)"
 repository="${repository:-microsoft/agent-framework}"
-foundry_portal_url="https://ai.azure.com/resource/overview?wsid=${project_id}&tid=${tenant_id}"
 
 umask 077
 temp_file="$(mktemp "${output}.tmp.XXXXXX")"
@@ -75,4 +72,3 @@ fi
 trap - EXIT
 chmod 600 "$output"
 echo "Created .env for agent development: $(pwd -P)/$output"
-echo "Foundry project portal: $foundry_portal_url"

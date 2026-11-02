@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Build Bicep templates
+        run: |
+          az bicep build --file infra/main.bicep
+          az bicep build --file infra/ai-gateway/main.bicep
+
+      - name: Run infrastructure tests
+        run: |
+          bash tests/test-apim-lifecycle.sh
+          bash tests/test-ai-gateway-model-registration.sh
+
+      - name: Run .NET unit tests
+        run: dotnet test FoundryHostedAgent.AIGateway.slnx --configuration Release --verbosity normal
+
+      - name: Build container image
+        run: docker build --tag simple-foundry-hosted-agent-dotnet-aigateway:ci -f agent/Dockerfile agent

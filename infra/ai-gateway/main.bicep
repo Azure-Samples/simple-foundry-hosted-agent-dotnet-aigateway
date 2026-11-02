@@ -17,15 +17,22 @@ param foundryResourceIds array = []
 param foundryManagedIdentityResource string = 'https://cognitiveservices.azure.com/'
 param foundryModels array = []
 param modelAliasesConfig array = []
+param foundryAgentsResourceGroupName string = resourceGroup().name
+param foundryAgentsAccountName string = ''
+param foundryAgentsProjectName string = ''
+param foundryAgentsAccountPrincipalId string = ''
+param foundryAgentsProjectPrincipalId string = ''
+param principalId string = ''
+param useManagedIdentityForFoundryConnections bool = true
+param aiGatewayAudience string = 'https://azure-api.net/aigateway'
 @secure()
 param toolServerConfigs object = {}
 
 var aiGatewayApiVersion = '2025-09-01-preview'
-var connectorGatewayApiVersion = '2026-05-01-preview'
 var appInsightsApiVersion = '2020-02-02'
 var logAnalyticsApiVersion = '2023-09-01'
 var telemetryWorkspaceName = 'default'
-var telemetryExporterName = 'appinsights'
+var aiGatewayUserRoleDefinitionId = 'caad7a21-134e-43f4-a550-c5ffc17e051c'
 var normalizedFoundryEndpoint = endsWith(foundryEndpoint, '/') ? foundryEndpoint : '${foundryEndpoint}/'
 #disable-next-line BCP081
 resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
@@ -36,18 +43,9 @@ resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if 
     type: 'SystemAssigned'
   }
   sku: {
-    name: 'Consumption'
+    name: 'Premium'
   }
   properties: {}
-}
-
-resource connectorNamespace 'Microsoft.Web/connectorGateways@2026-05-01-preview' = if (deployApimGatewayViaBicep) {
-  name: gatewayName
-  location: gatewayLocation
-  properties: {}
-  dependsOn: [
-    aiGateway
-  ]
 }
 
 #disable-next-line BCP081
@@ -81,7 +79,7 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09
   }
 }
 
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableMonitoring) {
+resource gatewayAppInsights 'Microsoft.Insights/components@2020-02-02' = if (enableMonitoring) {
   name: appInsightsName
   location: location
   kind: 'web'
@@ -89,20 +87,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableMoni
   properties: {
     Application_Type: 'web'
     WorkspaceResourceId: logAnalyticsWorkspace.id
-  }
-}
-
-#disable-next-line BCP081
-resource telemetryExporter 'Microsoft.ApiManagement/aigateways/workspaces/telemetryExporters@2025-09-01-preview' = if (enableMonitoring && deployApimGatewayViaBicep) {
-  parent: defaultWorkspace
-  name: telemetryExporterName
-  properties: {
-    kind: 'applicationInsights'
-    payloadCapture: false
-    applicationInsights: {
-      connectionString: appInsights!.properties.ConnectionString
-      resourceId: appInsights!.id
-    }
+    #disable-next-line BCP037
+    AzureMonitorWorkspaceIngestionMode: 'Enabled'
   }
 }
 
@@ -144,6 +130,32 @@ resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/mod
       modelName: last(split(model.resourceId, '/'))
       modelVersion: model.?modelVersion ?? null
     }
+    policies: model.?policies ?? [
+      {
+        type: 'tokenLimit'
+        period: 'minute'
+        count: model.?tokenLimit ?? 10000
+        counterKey: [
+          'identity'
+        ]
+      }
+      {
+        id: 'monthly-caller-budget'
+        type: 'costLimit'
+        period: 'month'
+        amount: model.?costLimit ?? 10
+        counterKey: [
+          'identity'
+        ]
+      }
+      {
+        type: 'contentSafety'
+        hateSeverity: model.?contentSafetySeverity ?? 'Medium'
+        selfHarmSeverity: model.?contentSafetySeverity ?? 'Medium'
+        sexualSeverity: model.?contentSafetySeverity ?? 'Medium'
+        violenceSeverity: model.?contentSafetySeverity ?? 'Medium'
+      }
+    ]
   }
 }]
 
@@ -187,23 +199,71 @@ resource runtimeApiKey 'Microsoft.ApiManagement/aigateways/apiKeys@2025-09-01-pr
   }
 }
 
+resource aiGatewayProjectUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApimGatewayViaBicep && !empty(foundryAgentsProjectName) && !empty(foundryAgentsProjectPrincipalId)) {
+  scope: aiGateway
+  name: guid(aiGateway.id, aiGatewayUserRoleDefinitionId, foundryAgentsProjectName)
+  properties: {
+    principalId: foundryAgentsProjectPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aiGatewayUserRoleDefinitionId)
+  }
+}
+
+resource aiGatewayAccountUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApimGatewayViaBicep && !empty(foundryAgentsAccountName) && !empty(foundryAgentsAccountPrincipalId)) {
+  scope: aiGateway
+  name: guid(aiGateway.id, aiGatewayUserRoleDefinitionId, foundryAgentsAccountName)
+  properties: {
+    principalId: foundryAgentsAccountPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aiGatewayUserRoleDefinitionId)
+  }
+}
+
+resource aiGatewayDeveloperUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployApimGatewayViaBicep && !empty(principalId)) {
+  scope: aiGateway
+  name: guid(aiGateway.id, aiGatewayUserRoleDefinitionId, principalId)
+  properties: {
+    principalId: principalId
+    principalType: 'User'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aiGatewayUserRoleDefinitionId)
+  }
+}
+
+var runtimeHostname = deployApimGatewayViaBicep ? (aiGateway!.properties.?frontend.?defaultHostname ?? replace(aiGateway!.properties.?gatewayUrl ?? '', 'https://', '')) : ''
+
+module githubConnection '../foundry-agents/github-connection.bicep' = if (deployApimGatewayViaBicep && !empty(foundryAgentsProjectName)) {
+  name: 'github-connection-${uniqueString(gatewayName, foundryAgentsProjectName)}'
+  scope: resourceGroup(foundryAgentsResourceGroupName)
+  dependsOn: [
+    aiGatewayProjectUserRoleAssignment
+    aiGatewayAccountUserRoleAssignment
+  ]
+  params: {
+    aiServicesName: foundryAgentsAccountName
+    aiProjectName: foundryAgentsProjectName
+    gatewayUrl: 'https://${runtimeHostname}'
+    useManagedIdentity: useManagedIdentityForFoundryConnections
+    gatewayAudience: aiGatewayAudience
+    gatewayApiKey: useManagedIdentityForFoundryConnections ? '' : (runtimeApiKey!.listSecrets().?primaryKey ?? runtimeApiKey!.listSecrets().?key ?? '')
+  }
+}
+
+var modelAliasResourceIds = [for alias in modelAliasesConfig: resourceId('Microsoft.ApiManagement/aigateways/workspaces/aliases', gatewayName, telemetryWorkspaceName, alias.armName)]
+
 output apimGatewayId string = resourceId('Microsoft.ApiManagement/aigateways', gatewayName)
-output connectorNamespaceId string = deployApimGatewayViaBicep ? connectorNamespace.id : ''
-output appInsightsId string = enableMonitoring ? appInsights.id : ''
-output appInsightsName string = enableMonitoring ? appInsights.name : ''
+output appInsightsId string = enableMonitoring ? gatewayAppInsights.id : ''
+output appInsightsName string = enableMonitoring ? gatewayAppInsights.name : ''
 output logAnalyticsWorkspaceId string = enableMonitoring ? logAnalyticsWorkspace.id : ''
 output logAnalyticsWorkspaceName string = enableMonitoring ? logAnalyticsWorkspace.name : ''
-output telemetryExporterId string = enableMonitoring && deployApimGatewayViaBicep ? telemetryExporter.id : ''
-output runtimeHostname string = deployApimGatewayViaBicep ? (empty(aiGateway!.properties.?frontend.?defaultHostname ?? '') ? replace(aiGateway!.properties.?gatewayUrl ?? '', 'https://', '') : aiGateway!.properties.frontend.defaultHostname) : ''
-output modelAliasIds array = [for (alias, i) in modelAliasesConfig: deployFoundryProvider && deployApimGatewayViaBicep ? modelAliases[i]!.id : '']
-output defaultModelAliasName string = !empty(modelAliasesConfig) ? modelAliasesConfig[0].aliasName : ''
+output runtimeHostname string = runtimeHostname
 output runtimeApiKeyId string = deployApimGatewayViaBicep ? runtimeApiKey.id : ''
 output gatewayPrincipalId string = deployApimGatewayViaBicep ? aiGateway!.identity.principalId : ''
 output foundryUserRoleAssignmentName string = deployFoundryProvider && deployApimGatewayViaBicep && !empty(foundryResourceIds) ? foundryUserRoleAssignments[0]!.outputs.roleAssignmentName : ''
+output modelAliasIds array = deployFoundryProvider && deployApimGatewayViaBicep ? modelAliasResourceIds : []
+output defaultModelAliasName string = !empty(modelAliasesConfig) ? modelAliasesConfig[0].aliasName : ''
 output gatewayLocation string = gatewayLocation
 output apiVersions object = {
   aiGateway: aiGatewayApiVersion
-  connectorGateway: connectorGatewayApiVersion
   appInsights: appInsightsApiVersion
   logAnalytics: logAnalyticsApiVersion
 }
