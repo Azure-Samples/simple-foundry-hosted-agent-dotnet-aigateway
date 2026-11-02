@@ -40,18 +40,110 @@ require_value() {
   printf '%s' "$value"
 }
 
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+sha256_uuid() {
+  local input="$1"
+  local hex
+  if command -v shasum >/dev/null 2>&1; then
+    hex="$(printf '%s' "$input" | shasum -a 256 | awk '{print substr($1,1,32)}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hex="$(printf '%s' "$input" | sha256sum | awk '{print substr($1,1,32)}')"
+  else
+    hex="$(printf '%s' "$input" | openssl dgst -sha256 | awk '{print substr($NF,1,32)}')"
+  fi
+  local b6=$(( (0x${hex:12:2} & 0x0f) | 0x50 ))
+  local b8=$(( (0x${hex:16:2} & 0x3f) | 0x80 ))
+  printf '%s-%s-%02x%s-%02x%s-%s\n' \
+    "${hex:0:8}" "${hex:8:4}" "$b6" "${hex:14:2}" "$b8" "${hex:18:2}" "${hex:20:12}"
+}
+
+validate_github_mcp_credential() {
+  local repository="$1"
+  local token="$2"
+  local least_privilege_doc="IMPLEMENTATION_NOTES.md#tighten-the-github-credential-to-least-privilege"
+  local had_warning=false
+
+  if ! [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "GITHUB_REPOSITORY must use the owner/repository format." >&2
+    return 1
+  fi
+  if [ -z "$token" ]; then
+    echo "GITHUB_MCP_TOKEN_TO_VALIDATE is required." >&2
+    return 1
+  fi
+
+  case "$token" in
+    github_pat_*|ghs_*)
+      local repo_json=""
+      if repo_json="$(curl -fsSL --max-time 30 \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer ${token}" \
+        -H "User-Agent: foundry-ai-gateway-sample" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${repository}" 2>/dev/null)"; then
+        if ! grep -Eq '"pull"[[:space:]]*:[[:space:]]*true' <<< "$repo_json"; then
+          echo "Warning: The GitHub credential may not have read access to ${repository}." >&2
+          had_warning=true
+        fi
+        local granted_write=""
+        local perm
+        for perm in admin maintain push triage; do
+          if grep -Eq "\"${perm}\"[[:space:]]*:[[:space:]]*true" <<< "$repo_json"; then
+            granted_write="${granted_write:+${granted_write}, }${perm}"
+          fi
+        done
+        if [ -n "$granted_write" ]; then
+          echo "Warning: The GitHub credential has write-capable repository permissions (${granted_write}). Prefer a read-only token; see ${least_privilege_doc}" >&2
+          had_warning=true
+        fi
+        local spec description path
+        for spec in \
+          "repository contents:contents" \
+          "repository issues:issues?per_page=1" \
+          "repository pull requests:pulls?per_page=1" \
+          "repository Actions runs:actions/runs?per_page=1"; do
+          description="${spec%%:*}"
+          path="${spec#*:}"
+          if ! curl -fsSL --max-time 30 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${token}" \
+            -H "User-Agent: foundry-ai-gateway-sample" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${repository}/${path}" >/dev/null 2>&1; then
+            echo "Warning: Could not verify ${description} read access." >&2
+            had_warning=true
+          fi
+        done
+      else
+        echo "Warning: Could not verify repository read access for ${repository}. Provisioning continues." >&2
+        had_warning=true
+      fi
+      ;;
+    *)
+      echo "Warning: Using a broad, account-wide GitHub credential (OAuth or classic token). It works, but the postprovision hook stores it in the cloud AI Gateway ToolServer. For the least-privilege fix (GitHub portal and command-line steps), open ${least_privilege_doc}" >&2
+      had_warning=true
+      ;;
+  esac
+
+  if [ "$had_warning" = true ]; then
+    echo "Continuing with the selected GitHub credential. See the warnings above to tighten it to least privilege."
+  else
+    echo "GitHub MCP credential has the required read access and no coarse write role on the target repository."
+  fi
+}
+
 remove_azd_env_values() {
   local env_file="${AZD_ENV_FILE:-.azure/${environment_name}/.env}"
   [ -f "$env_file" ] || return 0
-  python3 - "$env_file" "$@" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-remove = set(sys.argv[2:])
-lines = path.read_text().splitlines()
-path.write_text("\n".join(line for line in lines if line.split("=", 1)[0] not in remove) + "\n")
-PY
+  local tmp_file
+  tmp_file="$(mktemp "${env_file}.tmp.XXXXXX")"
+  awk -F= -v keys=" $* " '
+    index(keys, " " $1 " ") == 0 { print }
+  ' "$env_file" > "$tmp_file"
+  mv -f "$tmp_file" "$env_file"
 }
 
 get_gateway_api_key_value() {
@@ -87,7 +179,7 @@ verify_gateway_model_route() {
   local response_file
   local status=""
 
-  request_body="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "messages": [{"role": "user", "content": "Reply with exactly one word: ok"}], "max_completion_tokens": 128}))' "$model")"
+  request_body="{\"model\":\"$(json_escape "$model")\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly one word: ok\"}],\"max_completion_tokens\":128}"
   response_file="$(mktemp)"
 
   for attempt in $(seq 1 15); do
@@ -161,25 +253,24 @@ configure_gateway_monitoring() {
     az provider register --namespace Microsoft.Monitor --wait
   fi
 
+  local ingestion_endpoint=""
+  local workspace_resource_id=""
   for attempt in $(seq 1 60); do
-    if app_insights_json="$(az rest \
-      --method get \
-      --uri "https://management.azure.com${gateway_app_insights_id}?api-version=${APP_INSIGHTS_API_VERSION}" \
-      --query properties \
-      -o json 2>/dev/null)" &&
-      jq -e '
-        (.IngestionEndpoint // "") != "" and
-        (.MetricsIngestionEndpoint // "") != "" and
-        (.LogsIngestionEndpoint // "") != "" and
-        (.TracesIngestionEndpoint // "") != "" and
-        (.DefaultDataCollectionRuleResourceId // "") != ""
-      ' >/dev/null <<< "$app_insights_json"; then
-      metrics_endpoint="$(jq -r '.MetricsIngestionEndpoint' <<< "$app_insights_json")"
-      logs_endpoint="$(jq -r '.LogsIngestionEndpoint' <<< "$app_insights_json")"
-      traces_endpoint="$(jq -r '.TracesIngestionEndpoint' <<< "$app_insights_json")"
-      dcr_scope="$(jq -r '.DefaultDataCollectionRuleResourceId' <<< "$app_insights_json")"
+    if IFS=$'\t' read -r ingestion_endpoint metrics_endpoint logs_endpoint traces_endpoint dcr_scope workspace_resource_id < <(
+      az rest \
+        --method get \
+        --uri "https://management.azure.com${gateway_app_insights_id}?api-version=${APP_INSIGHTS_API_VERSION}" \
+        --query "[properties.IngestionEndpoint || properties.ConnectionString || '', properties.MetricsIngestionEndpoint || properties.OTLPMetricsEndpoint || '', properties.LogsIngestionEndpoint || properties.OTLPLogsEndpoint || '', properties.TracesIngestionEndpoint || properties.OTLPTracesEndpoint || '', properties.DefaultDataCollectionRuleResourceId || properties.DataCollectionRuleResourceId || '', properties.WorkspaceResourceId || '']" \
+        -o tsv 2>/dev/null | paste -sd $'\t' -
+    ) &&
+      [ -n "$ingestion_endpoint" ] && [ "$ingestion_endpoint" != "None" ] &&
+      [ -n "$metrics_endpoint" ] && [ "$metrics_endpoint" != "None" ] &&
+      [ -n "$logs_endpoint" ] && [ "$logs_endpoint" != "None" ] &&
+      [ -n "$traces_endpoint" ] && [ "$traces_endpoint" != "None" ] &&
+      [ -n "$dcr_scope" ] && [ "$dcr_scope" != "None" ]; then
       break
     fi
+    dcr_scope=""
     echo "Waiting for Application Insights managed DCR/DCE and OTLP endpoints, attempt=${attempt}."
     sleep 10
   done
@@ -187,28 +278,15 @@ configure_gateway_monitoring() {
     echo "Application Insights did not populate its managed DCR/DCE and OTLP endpoints." >&2
     exit 1
   fi
-  if [ "$(jq -r '.WorkspaceResourceId // ""' <<< "$app_insights_json")" != "$log_analytics_workspace_id" ]; then
+  if [ "$workspace_resource_id" != "$log_analytics_workspace_id" ]; then
     echo "AI Gateway Application Insights is not connected to the expected Log Analytics workspace." >&2
     exit 1
   fi
 
-  role_assignment_name="$(python3 - "$dcr_scope" "$gateway_principal_id" "$MONITORING_METRICS_PUBLISHER_ROLE_ID" <<'PY'
-import hashlib
-import sys
-import uuid
-
-digest = bytearray(hashlib.sha256("|".join(sys.argv[1:]).encode()).digest()[:16])
-digest[6] = (digest[6] & 0x0F) | 0x50
-digest[8] = (digest[8] & 0x3F) | 0x80
-print(uuid.UUID(bytes=bytes(digest)))
-PY
-)"
+  role_assignment_name="$(sha256_uuid "${dcr_scope}|${gateway_principal_id}|${MONITORING_METRICS_PUBLISHER_ROLE_ID}")"
   role_assignment_id="${dcr_scope}/providers/Microsoft.Authorization/roleAssignments/${role_assignment_name}"
   role_definition_id="/subscriptions/${subscription_id}/providers/Microsoft.Authorization/roleDefinitions/${MONITORING_METRICS_PUBLISHER_ROLE_ID}"
-  role_assignment_body="$(jq -cn \
-    --arg principalId "$gateway_principal_id" \
-    --arg roleDefinitionId "$role_definition_id" \
-    '{properties:{principalId:$principalId,principalType:"ServicePrincipal",roleDefinitionId:$roleDefinitionId}}')"
+  role_assignment_body="{\"properties\":{\"principalId\":\"$(json_escape "$gateway_principal_id")\",\"principalType\":\"ServicePrincipal\",\"roleDefinitionId\":\"$(json_escape "$role_definition_id")\"}}"
   echo "Assigning Monitoring Metrics Publisher at the Application Insights managed DCR scope."
   az rest \
     --method put \
@@ -236,24 +314,7 @@ PY
     fi
   fi
 
-  exporter_body="$(jq -cn \
-    --arg resourceId "$gateway_app_insights_id" \
-    --arg metricsEndpoint "$metrics_endpoint" \
-    --arg logsEndpoint "$logs_endpoint" \
-    --arg tracesEndpoint "$traces_endpoint" \
-    '{
-      properties: {
-        kind: "OpenTelemetry",
-        payloadCapture: false,
-        applicationInsights: {resourceId:$resourceId},
-        openTelemetry: {
-          metricsEndpoint:$metricsEndpoint,
-          logsEndpoint:$logsEndpoint,
-          tracesEndpoint:$tracesEndpoint,
-          credentials:{managedIdentity:{resource:"https://monitor.azure.com"}}
-        }
-      }
-    }')"
+  exporter_body="{\"properties\":{\"kind\":\"OpenTelemetry\",\"payloadCapture\":false,\"applicationInsights\":{\"resourceId\":\"$(json_escape "$gateway_app_insights_id")\"},\"openTelemetry\":{\"metricsEndpoint\":\"$(json_escape "$metrics_endpoint")\",\"logsEndpoint\":\"$(json_escape "$logs_endpoint")\",\"tracesEndpoint\":\"$(json_escape "$traces_endpoint")\",\"credentials\":{\"managedIdentity\":{\"resource\":\"https://monitor.azure.com\"}}}}}"
   echo "Configuring the native OpenTelemetry exporter for AI Gateway."
   az rest --method put --uri "$exporter_uri" --body "$exporter_body" -o none
 }
@@ -442,8 +503,7 @@ if [ -z "$github_token" ]; then
   echo "GitHub authentication is required for GitHub MCP. Run 'gh auth login --hostname github.com', or provide GH_TOKEN to GitHub CLI in CI." >&2
   exit 1
 fi
-GITHUB_MCP_TOKEN_TO_VALIDATE="$github_token" \
-  python3 "$REPO_ROOT/github_credential_validator.py" "$github_repository"
+validate_github_mcp_credential "$github_repository" "$github_token"
 echo "Using the active GitHub CLI login for GitHub MCP."
 case "$github_token" in
   Bearer\ *) github_authorization="$github_token" ;;
@@ -451,45 +511,39 @@ case "$github_token" in
 esac
 
 tool_server_body="$(mktemp)"
-export GITHUB_MCP_AUTHORIZATION="$github_authorization"
-export GITHUB_MCP_SERVER
-export GITHUB_MCP_TOOLS
-python3 - <<'PY' > "$tool_server_body"
-import json
-import os
-
-print(json.dumps({
-    "properties": {
-        "displayName": "GitHub repository digest",
-        "description": "Read-only GitHub tools for repository digests.",
-        "type": "mcp",
-        "failureMode": "failClosed",
-        "policies": [{
-            "type": "contentSafety",
-            "hateSeverity": "Medium",
-            "selfHarmSeverity": "Medium",
-            "sexualSeverity": "Medium",
-            "violenceSeverity": "Medium",
-        }],
-        "endpoints": [{
-            "namespace": "github",
-            "kind": "mcp",
-            "mcp": {
-                "url": os.environ["GITHUB_MCP_SERVER"],
-                "transport": "streamableHttp",
-            },
-            "credentials": {
-                "type": "header",
-                "headers": {
-                    "Authorization": [os.environ["GITHUB_MCP_AUTHORIZATION"]],
-                    "X-MCP-Readonly": ["true"],
-                    "X-MCP-Tools": [os.environ["GITHUB_MCP_TOOLS"]],
-                },
-            },
-        }],
-    }
-}))
-PY
+cat > "$tool_server_body" <<EOF
+{
+  "properties": {
+    "displayName": "GitHub repository digest",
+    "description": "Read-only GitHub tools for repository digests.",
+    "type": "mcp",
+    "failureMode": "failClosed",
+    "policies": [{
+      "type": "contentSafety",
+      "hateSeverity": "Medium",
+      "selfHarmSeverity": "Medium",
+      "sexualSeverity": "Medium",
+      "violenceSeverity": "Medium"
+    }],
+    "endpoints": [{
+      "namespace": "github",
+      "kind": "mcp",
+      "mcp": {
+        "url": "$(json_escape "$GITHUB_MCP_SERVER")",
+        "transport": "streamableHttp"
+      },
+      "credentials": {
+        "type": "header",
+        "headers": {
+          "Authorization": ["$(json_escape "$github_authorization")"],
+          "X-MCP-Readonly": ["true"],
+          "X-MCP-Tools": ["$(json_escape "$GITHUB_MCP_TOOLS")"]
+        }
+      }
+    }]
+  }
+}
+EOF
 
 echo "Injecting the read-only GitHub MCP credential into the Bicep-provisioned ToolServer."
 az rest \
@@ -499,7 +553,7 @@ az rest \
   -o none
 rm -f "$tool_server_body"
 tool_server_body=""
-unset github_token github_authorization GITHUB_MCP_AUTHORIZATION
+unset github_token github_authorization
 
 saved_gateway_api_key="$(first_value "${AZURE_AI_GATEWAY_API_KEY:-}" "$(azd_value AZURE_AI_GATEWAY_API_KEY)")"
 if ! gateway_api_key="$(get_gateway_api_key_value)"; then
@@ -529,7 +583,8 @@ if ! toolbox_json="$(azd ai toolbox show "$TOOLBOX_NAME" \
     --project-endpoint "$project_endpoint" \
     -o json)"
 fi
-toolbox_endpoint="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["endpoint"])' <<< "$toolbox_json")"
+toolbox_endpoint="$(sed -n 's/.*"endpoint"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<< "$toolbox_json" | head -n 1)"
+toolbox_endpoint="$(require_value TOOLBOX_ENDPOINT "$toolbox_endpoint")"
 azd env set TOOLBOX_ENDPOINT "$toolbox_endpoint"
 remove_azd_env_values \
   AI_SERVICES_NAME \

@@ -36,6 +36,79 @@ function Require-Value($Name, $Value) {
     return $Value
 }
 
+function Test-GitHubMcpCredential([string]$Repository, [string]$Token) {
+    $leastPrivilegeDoc = "IMPLEMENTATION_NOTES.md#tighten-the-github-credential-to-least-privilege"
+    if ($Repository -notmatch "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") {
+        throw "GITHUB_REPOSITORY must use the owner/repository format."
+    }
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        throw "GITHUB_MCP_TOKEN_TO_VALIDATE is required."
+    }
+
+    $warnings = [System.Collections.Generic.List[string]]::new()
+    if (-not ($Token.StartsWith("github_pat_", [StringComparison]::Ordinal) -or
+              $Token.StartsWith("ghs_", [StringComparison]::Ordinal))) {
+        $warnings.Add(
+            "Using a broad, account-wide GitHub credential (OAuth or classic token). " +
+            "It works, but the postprovision hook stores it in the cloud AI Gateway ToolServer. " +
+            "For the least-privilege fix (GitHub portal and command-line steps), open $leastPrivilegeDoc"
+        )
+    } else {
+        $headers = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $Token"
+            "User-Agent" = "foundry-ai-gateway-sample"
+            "X-GitHub-Api-Version" = "2022-11-28"
+        }
+        $repositoryUrl = "https://api.github.com/repos/$Repository"
+        try {
+            $payload = Invoke-RestMethod -Method Get -Uri $repositoryUrl -Headers $headers -TimeoutSec 30
+            if ($null -ne $payload.permissions) {
+                if ($payload.permissions.pull -ne $true) {
+                    $warnings.Add("The GitHub credential may not have read access to $Repository.")
+                }
+                $grantedWrite = @()
+                foreach ($perm in @("admin", "maintain", "push", "triage")) {
+                    if ($payload.permissions.$perm -eq $true) {
+                        $grantedWrite += $perm
+                    }
+                }
+                if ($grantedWrite.Count -gt 0) {
+                    $warnings.Add(
+                        "The GitHub credential has write-capable repository permissions (" +
+                        ($grantedWrite -join ", ") +
+                        "). Prefer a read-only token; see $leastPrivilegeDoc"
+                    )
+                }
+            }
+            $endpoints = @(
+                @{ Description = "repository contents"; Path = "contents" },
+                @{ Description = "repository issues"; Path = "issues?per_page=1" },
+                @{ Description = "repository pull requests"; Path = "pulls?per_page=1" },
+                @{ Description = "repository Actions runs"; Path = "actions/runs?per_page=1" }
+            )
+            foreach ($ep in $endpoints) {
+                try {
+                    Invoke-RestMethod -Method Get -Uri "$repositoryUrl/$($ep.Path)" -Headers $headers -TimeoutSec 30 | Out-Null
+                } catch {
+                    $warnings.Add("Could not verify $($ep.Description) read access ($($_.Exception.Message)).")
+                }
+            }
+        } catch {
+            $warnings.Add("Could not verify repository read access for $Repository ($($_.Exception.Message)). Provisioning continues.")
+        }
+    }
+
+    foreach ($warning in $warnings) {
+        [Console]::Error.WriteLine("Warning: $warning")
+    }
+    if ($warnings.Count -gt 0) {
+        Write-Host "Continuing with the selected GitHub credential. See the warnings above to tighten it to least privilege."
+    } else {
+        Write-Host "GitHub MCP credential has the required read access and no coarse write role on the target repository."
+    }
+}
+
 function Remove-AzdEnvValues([string[]]$Names) {
     $envFile = $env:AZD_ENV_FILE
     if ([string]::IsNullOrWhiteSpace($envFile)) {
@@ -145,14 +218,24 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
 
     $appInsightsUri = "https://management.azure.com${gatewayAppInsightsId}?api-version=$appInsightsApiVersion"
     $appInsightsProperties = $null
+    $ingestionEndpoint = ""
+    $metricsEndpoint = ""
+    $logsEndpoint = ""
+    $tracesEndpoint = ""
+    $dcrScope = ""
     for ($attempt = 1; $attempt -le 60; $attempt++) {
         try {
             $appInsightsProperties = (az rest --method get --uri $appInsightsUri --query properties -o json 2>$null | ConvertFrom-Json)
-            if (-not [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+            $ingestionEndpoint = First-Value @([string]$appInsightsProperties.IngestionEndpoint, [string]$appInsightsProperties.ConnectionString)
+            $metricsEndpoint = First-Value @([string]$appInsightsProperties.MetricsIngestionEndpoint, [string]$appInsightsProperties.OTLPMetricsEndpoint)
+            $logsEndpoint = First-Value @([string]$appInsightsProperties.LogsIngestionEndpoint, [string]$appInsightsProperties.OTLPLogsEndpoint)
+            $tracesEndpoint = First-Value @([string]$appInsightsProperties.TracesIngestionEndpoint, [string]$appInsightsProperties.OTLPTracesEndpoint)
+            $dcrScope = First-Value @([string]$appInsightsProperties.DefaultDataCollectionRuleResourceId, [string]$appInsightsProperties.DataCollectionRuleResourceId)
+            if (-not [string]::IsNullOrWhiteSpace($ingestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($metricsEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($logsEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($tracesEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($dcrScope)) {
                 break
             }
         } catch {
@@ -162,18 +245,17 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
         Start-Sleep -Seconds 10
     }
     if ($null -eq $appInsightsProperties -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+        [string]::IsNullOrWhiteSpace($ingestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($metricsEndpoint) -or
+        [string]::IsNullOrWhiteSpace($logsEndpoint) -or
+        [string]::IsNullOrWhiteSpace($tracesEndpoint) -or
+        [string]::IsNullOrWhiteSpace($dcrScope)) {
         throw "Application Insights did not populate its managed DCR/DCE and OTLP endpoints."
     }
     if ($appInsightsProperties.WorkspaceResourceId -ne $logAnalyticsWorkspaceId) {
         throw "AI Gateway Application Insights is not connected to the expected Log Analytics workspace."
     }
 
-    $dcrScope = [string]$appInsightsProperties.DefaultDataCollectionRuleResourceId
     $identityBytes = [Text.Encoding]::UTF8.GetBytes("$dcrScope|$gatewayPrincipalId|$monitoringMetricsPublisherRoleId")
     $identityHash = [Security.Cryptography.SHA256]::HashData($identityBytes)
     $roleAssignmentName = [guid]::new([byte[]]$identityHash[0..15]).ToString()
@@ -222,9 +304,9 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
                 resourceId = $gatewayAppInsightsId
             }
             openTelemetry = @{
-                metricsEndpoint = [string]$appInsightsProperties.MetricsIngestionEndpoint
-                logsEndpoint = [string]$appInsightsProperties.LogsIngestionEndpoint
-                tracesEndpoint = [string]$appInsightsProperties.TracesIngestionEndpoint
+                metricsEndpoint = $metricsEndpoint
+                logsEndpoint = $logsEndpoint
+                tracesEndpoint = $tracesEndpoint
                 credentials = @{
                     managedIdentity = @{
                         resource = "https://monitor.azure.com"
@@ -412,22 +494,7 @@ if ($null -ne (Get-Command gh -ErrorAction SilentlyContinue)) {
 if ([string]::IsNullOrWhiteSpace($githubToken)) {
     throw "GitHub authentication is required for GitHub MCP. Run 'gh auth login --hostname github.com', or provide GH_TOKEN to GitHub CLI in CI."
 }
-$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-if ($null -eq $pythonCommand) {
-    $pythonCommand = Get-Command python3 -ErrorAction SilentlyContinue
-}
-if ($null -eq $pythonCommand) {
-    throw "Python 3 is required to validate the GitHub MCP credential."
-}
-$env:GITHUB_MCP_TOKEN_TO_VALIDATE = $githubToken
-try {
-    & $pythonCommand.Source (Join-Path $repoRoot "github_credential_validator.py") $githubRepository
-    if ($LASTEXITCODE -ne 0) {
-        throw "GitHub MCP credential validation failed."
-    }
-} finally {
-    Remove-Item Env:GITHUB_MCP_TOKEN_TO_VALIDATE -ErrorAction SilentlyContinue
-}
+Test-GitHubMcpCredential -Repository $githubRepository -Token $githubToken
 Write-Host "Using the active GitHub CLI login for GitHub MCP."
 if ($githubToken.StartsWith("Bearer ", [StringComparison]::OrdinalIgnoreCase)) {
     $githubAuthorization = $githubToken
