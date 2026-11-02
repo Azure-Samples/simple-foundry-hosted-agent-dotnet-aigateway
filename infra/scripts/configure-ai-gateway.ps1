@@ -218,14 +218,24 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
 
     $appInsightsUri = "https://management.azure.com${gatewayAppInsightsId}?api-version=$appInsightsApiVersion"
     $appInsightsProperties = $null
+    $ingestionEndpoint = ""
+    $metricsEndpoint = ""
+    $logsEndpoint = ""
+    $tracesEndpoint = ""
+    $dcrScope = ""
     for ($attempt = 1; $attempt -le 60; $attempt++) {
         try {
             $appInsightsProperties = (az rest --method get --uri $appInsightsUri --query properties -o json 2>$null | ConvertFrom-Json)
-            if (-not [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -and
-                -not [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+            $ingestionEndpoint = First-Value @([string]$appInsightsProperties.IngestionEndpoint, [string]$appInsightsProperties.ConnectionString)
+            $metricsEndpoint = First-Value @([string]$appInsightsProperties.MetricsIngestionEndpoint, [string]$appInsightsProperties.OTLPMetricsEndpoint)
+            $logsEndpoint = First-Value @([string]$appInsightsProperties.LogsIngestionEndpoint, [string]$appInsightsProperties.OTLPLogsEndpoint)
+            $tracesEndpoint = First-Value @([string]$appInsightsProperties.TracesIngestionEndpoint, [string]$appInsightsProperties.OTLPTracesEndpoint)
+            $dcrScope = First-Value @([string]$appInsightsProperties.DefaultDataCollectionRuleResourceId, [string]$appInsightsProperties.DataCollectionRuleResourceId)
+            if (-not [string]::IsNullOrWhiteSpace($ingestionEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($metricsEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($logsEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($tracesEndpoint) -and
+                -not [string]::IsNullOrWhiteSpace($dcrScope)) {
                 break
             }
         } catch {
@@ -235,18 +245,17 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
         Start-Sleep -Seconds 10
     }
     if ($null -eq $appInsightsProperties -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.IngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.MetricsIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.LogsIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.TracesIngestionEndpoint) -or
-        [string]::IsNullOrWhiteSpace($appInsightsProperties.DefaultDataCollectionRuleResourceId)) {
+        [string]::IsNullOrWhiteSpace($ingestionEndpoint) -or
+        [string]::IsNullOrWhiteSpace($metricsEndpoint) -or
+        [string]::IsNullOrWhiteSpace($logsEndpoint) -or
+        [string]::IsNullOrWhiteSpace($tracesEndpoint) -or
+        [string]::IsNullOrWhiteSpace($dcrScope)) {
         throw "Application Insights did not populate its managed DCR/DCE and OTLP endpoints."
     }
     if ($appInsightsProperties.WorkspaceResourceId -ne $logAnalyticsWorkspaceId) {
         throw "AI Gateway Application Insights is not connected to the expected Log Analytics workspace."
     }
 
-    $dcrScope = [string]$appInsightsProperties.DefaultDataCollectionRuleResourceId
     $identityBytes = [Text.Encoding]::UTF8.GetBytes("$dcrScope|$gatewayPrincipalId|$monitoringMetricsPublisherRoleId")
     $identityHash = [Security.Cryptography.SHA256]::HashData($identityBytes)
     $roleAssignmentName = [guid]::new([byte[]]$identityHash[0..15]).ToString()
@@ -295,9 +304,9 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
                 resourceId = $gatewayAppInsightsId
             }
             openTelemetry = @{
-                metricsEndpoint = [string]$appInsightsProperties.MetricsIngestionEndpoint
-                logsEndpoint = [string]$appInsightsProperties.LogsIngestionEndpoint
-                tracesEndpoint = [string]$appInsightsProperties.TracesIngestionEndpoint
+                metricsEndpoint = $metricsEndpoint
+                logsEndpoint = $logsEndpoint
+                tracesEndpoint = $tracesEndpoint
                 credentials = @{
                     managedIdentity = @{
                         resource = "https://monitor.azure.com"

@@ -260,7 +260,7 @@ configure_gateway_monitoring() {
       az rest \
         --method get \
         --uri "https://management.azure.com${gateway_app_insights_id}?api-version=${APP_INSIGHTS_API_VERSION}" \
-        --query "[properties.IngestionEndpoint || '', properties.MetricsIngestionEndpoint || '', properties.LogsIngestionEndpoint || '', properties.TracesIngestionEndpoint || '', properties.DefaultDataCollectionRuleResourceId || '', properties.WorkspaceResourceId || '']" \
+        --query "[properties.IngestionEndpoint || properties.ConnectionString || '', properties.MetricsIngestionEndpoint || properties.OTLPMetricsEndpoint || '', properties.LogsIngestionEndpoint || properties.OTLPLogsEndpoint || '', properties.TracesIngestionEndpoint || properties.OTLPTracesEndpoint || '', properties.DefaultDataCollectionRuleResourceId || properties.DataCollectionRuleResourceId || '', properties.WorkspaceResourceId || '']" \
         -o tsv 2>/dev/null | paste -sd $'\t' -
     ) &&
       [ -n "$ingestion_endpoint" ] && [ "$ingestion_endpoint" != "None" ] &&
