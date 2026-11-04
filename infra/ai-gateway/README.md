@@ -3,7 +3,7 @@
 Run the commands in this README from the `infra/ai-gateway/` directory.
 
 [`main.bicep`](main.bicep) is a resource-group-scoped module for an AI Gateway
-with Premium SKU. With the default `deployApimGatewayViaBicep: true`, it
+(`sku` omitted so the resource provider defaults to `Standard`). With the default `deployApimGatewayViaBicep: true`, it
 creates `Microsoft.ApiManagement/aigateways` and `apiKeys/default`.
 When monitoring is enabled, it also provisions Log Analytics and a
 workspace-based Application Insights component (`AzureMonitorWorkspaceIngestionMode: Enabled`).

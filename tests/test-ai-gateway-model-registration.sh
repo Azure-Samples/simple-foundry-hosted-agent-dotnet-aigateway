@@ -56,10 +56,10 @@ done
 gateway_sku="$(jq -r '
   .resources[]
   | select(.type == "Microsoft.ApiManagement/aigateways")
-  | .sku.name
+  | .sku
 ' "$compiled_template")"
-if [ "$gateway_sku" != "Premium" ]; then
-  echo "AI Gateway must use the live RP Premium SKU." >&2
+if [ "$gateway_sku" != "null" ]; then
+  echo "AI Gateway must omit sku so the RP applies its default SKU." >&2
   echo "Actual: $gateway_sku" >&2
   exit 1
 fi

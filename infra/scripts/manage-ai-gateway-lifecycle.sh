@@ -215,7 +215,7 @@ discover_live_gateway() {
   if ! candidates="$(az resource list \
     --subscription "$subscription_id" \
     --resource-type Microsoft.ApiManagement/aigateways \
-    --query "[?tags.\"azd-env-name\"=='${environment_name}' && sku.name=='Premium'].[name,resourceGroup,location]" \
+    --query "[?tags.\"azd-env-name\"=='${environment_name}'].[name,resourceGroup,location]" \
     -o tsv)"; then
     fail "could not discover AI Gateway resources for azd environment ${environment_name}."
   fi
@@ -354,8 +354,6 @@ live_is_deleting() {
 }
 
 validate_live_ownership() {
-  [ "$live_sku" = "Premium" ] ||
-    fail "refusing ${resource_group}/${gateway_name}; expected SKU Premium but found ${live_sku:-unknown}."
   [ "$live_owner" = "$environment_name" ] ||
     fail "refusing ${resource_group}/${gateway_name}; expected azd-env-name=${environment_name} but found ${live_owner:-missing}."
   if [ -n "$live_location" ] && [ "$live_location" != "null" ]; then
