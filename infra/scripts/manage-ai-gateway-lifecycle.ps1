@@ -145,7 +145,7 @@ function Find-LiveGateway {
     $candidateLines = & az resource list `
         --subscription $subscriptionId `
         --resource-type Microsoft.ApiManagement/aigateways `
-        --query "[?tags.`"azd-env-name`"=='$environmentName' && sku.name=='Premium'].[name,resourceGroup,location]" `
+        --query "[?tags.`"azd-env-name`"=='$environmentName'].[name,resourceGroup,location]" `
         -o tsv
     if ($LASTEXITCODE -ne 0) {
         throw "AI Gateway lifecycle error: could not discover AI Gateway resources for azd environment $environmentName."
@@ -274,9 +274,6 @@ function Test-LiveDeleting($Record) {
 }
 
 function Assert-LiveOwnership($Record) {
-    if ($Record.Sku -ne "Premium") {
-        throw "AI Gateway lifecycle error: refusing $resourceGroup/$gatewayName; expected SKU Premium but found $($Record.Sku)."
-    }
     if ($Record.Owner -ne $environmentName) {
         throw "AI Gateway lifecycle error: refusing $resourceGroup/$gatewayName; expected azd-env-name=$environmentName but found $($Record.Owner)."
     }

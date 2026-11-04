@@ -55,9 +55,6 @@ resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if 
   identity: {
     type: 'SystemAssigned'
   }
-  sku: {
-    name: 'Premium'
-  }
   properties: empty(backendSubnetResourceId)
     ? {}
     : {
