@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-AI_GATEWAY_API_VERSION="2025-09-01-preview"
+AI_GATEWAY_API_VERSION="2026-11-01"
 DEFAULT_AI_GATEWAY_LOCATION="eastus2"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 

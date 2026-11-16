@@ -299,7 +299,6 @@ module aiGateway './ai-gateway/main.bicep' = {
       resourceId: foundryModels.outputs.modelDeploymentIds[i]
       modelName: deployment.modelName
       modelVersion: deployment.modelVersion
-      apiFormat: 'OpenAIChatCompletions'
       tokenLimit: deployment.capacity * 1000
       costLimit: 10
       contentSafetySeverity: 'Medium'
@@ -330,10 +329,10 @@ module aiGateway './ai-gateway/main.bicep' = {
     ]
     toolServerConfigs: empty(githubMcpAuthorization) ? {} : {
       github: {
+        toolServerType: 'mcp'
         displayName: 'GitHub repository digest'
         description: 'Read-only GitHub tools for repository digests.'
-        type: 'mcp'
-        failureMode: 'failClosed'
+        blockList: []
         policies: concat(
           [
             {
@@ -358,23 +357,28 @@ module aiGateway './ai-gateway/main.bicep' = {
           {
             namespace: 'github'
             kind: 'mcp'
+            mode: 'failClosed'
             mcp: {
-              url: githubMcpServerUrl
+              endpoint: {
+                url: githubMcpServerUrl
+              }
               transport: 'streamableHttp'
             }
-            credentials: {
-              type: 'header'
-              headers: {
-                Authorization: [
-                  githubMcpAuthorization
-                ]
-                'X-MCP-Readonly': [
-                  'true'
-                ]
-                'X-MCP-Tools': [
-                  githubMcpTools
-                ]
-              }
+            authentication: {
+              headers: [
+                {
+                  name: 'Authorization'
+                  value: githubMcpAuthorization
+                }
+                {
+                  name: 'X-MCP-Readonly'
+                  value: 'true'
+                }
+                {
+                  name: 'X-MCP-Tools'
+                  value: githubMcpTools
+                }
+              ]
             }
           }
         ]

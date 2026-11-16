@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
-$aiGatewayApiVersion = "2025-09-01-preview"
+$aiGatewayApiVersion = "2026-11-01"
 $defaultAiGatewayLocation = "eastus2"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 

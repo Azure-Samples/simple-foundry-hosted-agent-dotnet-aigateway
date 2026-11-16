@@ -93,7 +93,6 @@ cat > /tmp/ai-gateway.parameters.json <<EOF
         "armName": "gpt-latest",
         "modelName": "gpt-6.1-sol",
         "modelVersion": "2026-09-29",
-        "apiFormat": "OpenAIChatCompletions",
         "supportedEndpoints": ["/openai/v1/chat/completions", "/openai/v1/responses"],
         "resourceId": "$FOUNDRY_ACCOUNT_ID/deployments/gpt-latest"
       },
@@ -101,7 +100,6 @@ cat > /tmp/ai-gateway.parameters.json <<EOF
         "armName": "gpt-6-sol",
         "modelName": "gpt-6-sol",
         "modelVersion": "2026-09-22",
-        "apiFormat": "OpenAIChatCompletions",
         "supportedEndpoints": ["/openai/v1/chat/completions", "/openai/v1/responses"],
         "resourceId": "$FOUNDRY_ACCOUNT_ID/deployments/gpt-6-sol"
       },
@@ -109,7 +107,6 @@ cat > /tmp/ai-gateway.parameters.json <<EOF
         "armName": "gpt-mini-latest",
         "modelName": "gpt-5.4-mini",
         "modelVersion": "2026-03-17",
-        "apiFormat": "OpenAIChatCompletions",
         "supportedEndpoints": ["/openai/v1/chat/completions", "/openai/v1/responses"],
         "resourceId": "$FOUNDRY_ACCOUNT_ID/deployments/gpt-mini-latest"
       }
@@ -162,7 +159,7 @@ project and has `metadata.type: custom_MCP`.
 If `useManagedIdentityForFoundryConnections` is set to `false`, the connection
 falls back to `CustomKeys` using
 `runtimeApiKey.listSecrets().?primaryKey ?? runtimeApiKey.listSecrets().?key`
-(the live `2025-09-01-preview` `listSecrets` payload returns `primaryKey` and
+(the live `2026-11-01` `listSecrets` payload returns `primaryKey` and
 `secondaryKey`) passed only through the connection module's `@secure()`
 `gatewayApiKey` parameter. No deployment output contains the secret. Stable
 names and incremental deployment keep repeat provisioning idempotent.
@@ -185,14 +182,13 @@ Application Insights has created its managed DCR/DCE and OTLP endpoints:
    blocks creating this nested role assignment from ARM/Bicep.
 4. Create
    `Microsoft.ApiManagement/aigateways/{gatewayName}/workspaces/default/telemetryExporters/applicationInsights`
-   as `kind: OpenTelemetry`, using the Application Insights resource ID, the
-   metrics/logs/traces OTLP endpoints, and `openTelemetry.credentials.managedIdentity`
+   as `telemetryExporterType: OpenTelemetry`, using the metrics/logs/traces OTLP
+   endpoint objects (`{ url: ... }`) and `authentication.managedIdentity`
    audience `https://monitor.azure.com`.
 
-Exporter `kind` is immutable. The hook deletes an existing exporter with a
-different kind before recreating it as OpenTelemetry. The preview service can
-omit `tracesEndpoint` from exporter GET responses; metrics and logs are enough
-for the portal dashboard eligibility check.
+Exporter `telemetryExporterType` is immutable. The hook deletes an existing
+exporter with a different type before recreating it as OpenTelemetry. Metrics
+and logs are enough for the portal dashboard eligibility check.
 
 ## Postprovision configuration
 

@@ -387,7 +387,7 @@ assert_contains "$error_file" "run 'azd down'"
 assert_contains "$marker_file" "state=pending"
 
 for token in \
-  "2025-09-01-preview" \
+  "2026-11-01" \
   "Microsoft.ApiManagement/aigateways" \
   "Premium" \
   "azd-env-name" \

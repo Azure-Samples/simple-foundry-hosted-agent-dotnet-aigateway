@@ -32,7 +32,7 @@ param allowedCallerCidrRanges array = []
 @secure()
 param toolServerConfigs object = {}
 
-var aiGatewayApiVersion = '2025-09-01-preview'
+var aiGatewayApiVersion = '2026-11-01'
 var appInsightsApiVersion = '2020-02-02'
 var logAnalyticsApiVersion = '2023-09-01'
 var telemetryWorkspaceName = 'default'
@@ -48,7 +48,7 @@ var optionalIpFilterPolicies = empty(allowedCallerCidrRanges)
       }
     ]
 #disable-next-line BCP081
-resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
+resource aiGateway 'Microsoft.ApiManagement/aigateways@2026-11-01' = if (deployApimGatewayViaBicep) {
   name: gatewayName
   location: gatewayLocation
   tags: tags
@@ -70,7 +70,7 @@ resource aiGateway 'Microsoft.ApiManagement/aigateways@2025-09-01-preview' = if 
 }
 
 #disable-next-line BCP081
-resource defaultWorkspace 'Microsoft.ApiManagement/aigateways/workspaces@2025-09-01-preview' existing = if (deployApimGatewayViaBicep) {
+resource defaultWorkspace 'Microsoft.ApiManagement/aigateways/workspaces@2026-11-01' existing = if (deployApimGatewayViaBicep) {
   parent: aiGateway
   name: telemetryWorkspaceName
 }
@@ -114,37 +114,37 @@ resource gatewayAppInsights 'Microsoft.Insights/components@2020-02-02' = if (ena
 }
 
 #disable-next-line BCP081
-resource foundryProvider 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders@2025-09-01-preview' = if (deployFoundryProvider && deployApimGatewayViaBicep) {
+resource foundryProvider 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders@2026-11-01' = if (deployFoundryProvider && deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: foundryProviderName
   dependsOn: [
     foundryUserRoleAssignments
   ]
   properties: {
-    kind: 'Foundry'
+    modelProviderType: 'Foundry'
     displayName: foundryProviderDisplayName
     description: empty(foundryProviderDescription) ? null : foundryProviderDescription
     foundry: {
-      endpoint: normalizedFoundryEndpoint
+      endpoint: {
+        url: normalizedFoundryEndpoint
+      }
       resourceIds: foundryResourceIds
-      authentication: {
-        kind: 'ManagedIdentity'
-        managedIdentity: {
-          resource: foundryManagedIdentityResource
-        }
+    }
+    authentication: {
+      managedIdentity: {
+        resource: foundryManagedIdentityResource
       }
     }
   }
 }
 
 #disable-next-line BCP081
-resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders/models@2025-09-01-preview' = [for model in foundryModels: if (deployFoundryProvider && deployApimGatewayViaBicep) {
+resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/modelProviders/models@2026-11-01' = [for model in foundryModels: if (deployFoundryProvider && deployApimGatewayViaBicep) {
   parent: foundryProvider
   name: model.armName
   properties: {
     description: model.?description ?? null
     displayName: model.modelName
-    apiFormat: model.apiFormat
     supportedEndpoints: model.supportedEndpoints
     deployment: {
       resourceId: model.resourceId
@@ -184,7 +184,7 @@ resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/mod
 }]
 
 #disable-next-line BCP081
-resource modelAliases 'Microsoft.ApiManagement/aigateways/workspaces/aliases@2025-09-01-preview' = [for alias in modelAliasesConfig: if (deployFoundryProvider && deployApimGatewayViaBicep) {
+resource modelAliases 'Microsoft.ApiManagement/aigateways/workspaces/aliases@2026-11-01' = [for alias in modelAliasesConfig: if (deployFoundryProvider && deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: alias.armName
   dependsOn: [
@@ -208,14 +208,14 @@ resource modelAliases 'Microsoft.ApiManagement/aigateways/workspaces/aliases@202
 }]
 
 #disable-next-line BCP081
-resource toolServers 'Microsoft.ApiManagement/aigateways/workspaces/toolServers@2025-09-01-preview' = [for config in items(toolServerConfigs): if (deployApimGatewayViaBicep) {
+resource toolServers 'Microsoft.ApiManagement/aigateways/workspaces/toolServers@2026-11-01' = [for config in items(toolServerConfigs): if (deployApimGatewayViaBicep) {
   parent: defaultWorkspace
   name: config.key
   properties: config.value
 }]
 
 #disable-next-line BCP081
-resource runtimeApiKey 'Microsoft.ApiManagement/aigateways/apiKeys@2025-09-01-preview' = if (deployApimGatewayViaBicep) {
+resource runtimeApiKey 'Microsoft.ApiManagement/aigateways/apiKeys@2026-11-01' = if (deployApimGatewayViaBicep) {
   parent: aiGateway
   name: 'default'
   properties: {
