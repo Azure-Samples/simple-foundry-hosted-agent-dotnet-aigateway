@@ -39,19 +39,19 @@ for policy_token in \
   "costLimit" \
   "period', 'month" \
   "amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10)" \
-  "createObject('id', 'monthly-caller-budget', 'type', 'costLimit', 'period', 'month', 'amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10), 'counterKey', createArray('identity'))" \
-  "contentSafety" \
-  "hateSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "selfHarmSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "sexualSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "violenceSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')"; do
+  "createObject('id', 'monthly-caller-budget', 'type', 'costLimit', 'period', 'month', 'amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10), 'counterKey', createArray('identity'))"; do
   if ! grep -Fq "$policy_token" <<< "$actual_model_policies"; then
-    echo "Gateway model PUTs must include identity-keyed token limits and Medium content safety." >&2
+    echo "Gateway model PUTs must include identity-keyed token and cost limits." >&2
     echo "Missing: $policy_token" >&2
     echo "Actual: $actual_model_policies" >&2
     exit 1
   fi
 done
+if grep -Fq "contentSafety" <<< "$actual_model_policies"; then
+  echo "Gateway model PUTs must omit contentSafety pending 2026-11-01 Content Safety API alignment." >&2
+  echo "Actual: $actual_model_policies" >&2
+  exit 1
+fi
 
 gateway_sku="$(jq -r '
   .resources[]
@@ -216,10 +216,9 @@ for token in \
   "/openai/v1/chat/completions" \
   "/openai/v1/responses" \
   "mul(variables('gatewayModelDeployments')[copyIndex('value')].capacity, 1000)" \
-  "'costLimit', 10" \
-  "'contentSafetySeverity', 'Medium'"; do
+  "'costLimit', 10"; do
   if ! grep -Fq "$token" <<< "$root_model_input"; then
-    echo "Root model registrations must use the live RP API, capacity-scaled token limits, and Medium content safety." >&2
+    echo "Root model registrations must use the live RP API and capacity-scaled token and cost limits." >&2
     echo "Missing: $token" >&2
     echo "Actual: $root_model_input" >&2
     exit 1

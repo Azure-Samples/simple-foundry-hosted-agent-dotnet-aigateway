@@ -170,13 +170,14 @@ resource foundryCatalogModels 'Microsoft.ApiManagement/aigateways/workspaces/mod
             'identity'
           ]
         }
-        {
-          type: 'contentSafety'
-          hateSeverity: model.?contentSafetySeverity ?? 'Medium'
-          selfHarmSeverity: model.?contentSafetySeverity ?? 'Medium'
-          sexualSeverity: model.?contentSafetySeverity ?? 'Medium'
-          violenceSeverity: model.?contentSafetySeverity ?? 'Medium'
-        }
+        // Temporarily disabled pending 2026-11-01 Content Safety API alignment
+        // {
+        //   type: 'contentSafety'
+        //   hateSeverity: model.?contentSafetySeverity ?? 'Medium'
+        //   selfHarmSeverity: model.?contentSafetySeverity ?? 'Medium'
+        //   sexualSeverity: model.?contentSafetySeverity ?? 'Medium'
+        //   violenceSeverity: model.?contentSafetySeverity ?? 'Medium'
+        // }
       ],
       optionalIpFilterPolicies
     )

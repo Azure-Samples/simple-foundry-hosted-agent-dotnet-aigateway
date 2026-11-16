@@ -26,10 +26,9 @@ Each registered model receives a per-caller `tokenLimit` of 1,000 times its
 deployment capacity per minute. With the sample capacities, `gpt-latest` and
 `gpt-6-sol` allow 20,000 tokens per minute, while `gpt-mini-latest` allows
 200,000. Each model also receives a `$10.00/month` `costLimit` per caller
-identity (`id: monthly-caller-budget`) and `Medium` `contentSafety` thresholds
-for Hate, Self-Harm, Sexual, and Violence. The postprovision configuration adds
-the same `Medium` content-safety thresholds to the `toolServers/github` MCP
-server. You can optionally pass `allowedCallerCidrRanges` (for example
+identity (`id: monthly-caller-budget`). Gateway `contentSafety` policy wiring
+is temporarily disabled pending `2026-11-01` Content Safety API alignment. You
+can optionally pass `allowedCallerCidrRanges` (for example
 `['10.0.0.0/8']`) to add an inline `ipFilter` policy (`action: Allow`) to each
 model registration, and `backendSubnetResourceId` (pointing to a subnet in the
 same subscription and region delegated to `Microsoft.App/environments`) to

@@ -301,7 +301,8 @@ module aiGateway './ai-gateway/main.bicep' = {
       modelVersion: deployment.modelVersion
       tokenLimit: deployment.capacity * 1000
       costLimit: 10
-      contentSafetySeverity: 'Medium'
+      // Temporarily disabled pending 2026-11-01 Content Safety API alignment
+      // contentSafetySeverity: 'Medium'
       supportedEndpoints: [
         '/openai/v1/chat/completions'
         '/openai/v1/responses'
@@ -333,26 +334,16 @@ module aiGateway './ai-gateway/main.bicep' = {
         displayName: 'GitHub repository digest'
         description: 'Read-only GitHub tools for repository digests.'
         blockList: []
-        policies: concat(
-          [
-            {
-              type: 'contentSafety'
-              hateSeverity: 'Medium'
-              selfHarmSeverity: 'Medium'
-              sexualSeverity: 'Medium'
-              violenceSeverity: 'Medium'
-            }
-          ],
-          empty(allowedCallerCidrRanges)
-            ? []
-            : [
-                {
-                  type: 'ipFilter'
-                  action: 'Allow'
-                  cidrRanges: allowedCallerCidrRanges
-                }
-              ]
-        )
+        // Temporarily disabled contentSafety policy pending 2026-11-01 Content Safety API alignment
+        policies: empty(allowedCallerCidrRanges)
+          ? []
+          : [
+              {
+                type: 'ipFilter'
+                action: 'Allow'
+                cidrRanges: allowedCallerCidrRanges
+              }
+            ]
         endpoints: [
           {
             namespace: 'github'

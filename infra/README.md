@@ -22,11 +22,10 @@ resources.
 
 By default, each model has a `tokenLimit` of 1,000 tokens per minute per unit
 of deployment capacity (20,000 for `gpt-latest` and `gpt-6-sol`; 200,000 for
-`gpt-mini-latest`), a `$10.00/month` `costLimit` per caller identity
-(`monthly-caller-budget`), and `Medium` `contentSafety` thresholds for Hate,
-Self-Harm, Sexual, and Violence. The same content-safety thresholds are applied
-to the `toolServers/github` MCP server. You can also pass optional
-`backendSubnetResourceId` (`properties.backend.subnet.id`, delegated to
+`gpt-mini-latest`) and a `$10.00/month` `costLimit` per caller identity
+(`monthly-caller-budget`). Gateway `contentSafety` policy wiring is temporarily
+disabled pending `2026-11-01` Content Safety API alignment. You can also pass
+optional `backendSubnetResourceId` (`properties.backend.subnet.id`, delegated to
 `Microsoft.App/environments`) for outbound VNet integration and
 `allowedCallerCidrRanges` for inbound caller IP filtering (`ipFilter`). The
 `gpt-latest` alias fails over across `gpt-6.1-sol` (priority 0), `gpt-6-sol`
