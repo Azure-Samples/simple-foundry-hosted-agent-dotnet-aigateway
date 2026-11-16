@@ -299,10 +299,10 @@ module aiGateway './ai-gateway/main.bicep' = {
       resourceId: foundryModels.outputs.modelDeploymentIds[i]
       modelName: deployment.modelName
       modelVersion: deployment.modelVersion
-      apiFormat: 'OpenAIChatCompletions'
       tokenLimit: deployment.capacity * 1000
       costLimit: 10
-      contentSafetySeverity: 'Medium'
+      // Temporarily disabled pending 2026-11-01 Content Safety API alignment
+      // contentSafetySeverity: 'Medium'
       supportedEndpoints: [
         '/openai/v1/chat/completions'
         '/openai/v1/responses'
@@ -330,51 +330,46 @@ module aiGateway './ai-gateway/main.bicep' = {
     ]
     toolServerConfigs: empty(githubMcpAuthorization) ? {} : {
       github: {
+        toolServerType: 'mcp'
         displayName: 'GitHub repository digest'
         description: 'Read-only GitHub tools for repository digests.'
-        type: 'mcp'
-        failureMode: 'failClosed'
-        policies: concat(
-          [
-            {
-              type: 'contentSafety'
-              hateSeverity: 'Medium'
-              selfHarmSeverity: 'Medium'
-              sexualSeverity: 'Medium'
-              violenceSeverity: 'Medium'
-            }
-          ],
-          empty(allowedCallerCidrRanges)
-            ? []
-            : [
-                {
-                  type: 'ipFilter'
-                  action: 'Allow'
-                  cidrRanges: allowedCallerCidrRanges
-                }
-              ]
-        )
+        blockList: []
+        // Temporarily disabled contentSafety policy pending 2026-11-01 Content Safety API alignment
+        policies: empty(allowedCallerCidrRanges)
+          ? []
+          : [
+              {
+                type: 'ipFilter'
+                action: 'Allow'
+                cidrRanges: allowedCallerCidrRanges
+              }
+            ]
         endpoints: [
           {
             namespace: 'github'
             kind: 'mcp'
+            mode: 'failClosed'
             mcp: {
-              url: githubMcpServerUrl
+              endpoint: {
+                url: githubMcpServerUrl
+              }
               transport: 'streamableHttp'
             }
-            credentials: {
-              type: 'header'
-              headers: {
-                Authorization: [
-                  githubMcpAuthorization
-                ]
-                'X-MCP-Readonly': [
-                  'true'
-                ]
-                'X-MCP-Tools': [
-                  githubMcpTools
-                ]
-              }
+            authentication: {
+              headers: [
+                {
+                  name: 'Authorization'
+                  value: githubMcpAuthorization
+                }
+                {
+                  name: 'X-MCP-Readonly'
+                  value: 'true'
+                }
+                {
+                  name: 'X-MCP-Tools'
+                  value: githubMcpTools
+                }
+              ]
             }
           }
         ]

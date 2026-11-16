@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
-$aiGatewayApiVersion = "2025-09-01-preview"
+$aiGatewayApiVersion = "2026-11-01"
 $legacyAiGatewayApiVersion = "2025-09-01-preview"
 $foundryUserRoleId = "53ca6127-db72-4b80-b1b0-d745d6d5456d"
 $monitoringMetricsPublisherRoleId = "3913510d-42f4-4e42-8a64-420c390055eb"
@@ -274,13 +274,13 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
     $exporterUri = "https://management.azure.com${GatewayResourceId}/workspaces/default/telemetryExporters/applicationInsights?api-version=$aiGatewayApiVersion"
     $exporterExists = $true
     try {
-        $exporterKind = [string](az rest --method get --uri $exporterUri --query properties.kind -o tsv 2>$null)
+        $exporterKind = [string](az rest --method get --uri $exporterUri --query properties.telemetryExporterType -o tsv 2>$null)
     } catch {
         $exporterExists = $false
         $exporterKind = ""
     }
     if ($exporterExists -and $exporterKind -ne "OpenTelemetry") {
-        Write-Host "Replacing the legacy Application Insights exporter because exporter kind is immutable."
+        Write-Host "Replacing the legacy Application Insights exporter because exporter type is immutable."
         az rest --method delete --uri $exporterUri -o none
         $exporterDeleted = $false
         for ($attempt = 1; $attempt -le 30; $attempt++) {
@@ -298,19 +298,22 @@ function Configure-GatewayMonitoring($MonitoringEnabled, $GatewayResourceId, $Su
 
     $exporterBody = @{
         properties = @{
-            kind = "OpenTelemetry"
+            telemetryExporterType = "OpenTelemetry"
             payloadCapture = $false
-            applicationInsights = @{
-                resourceId = $gatewayAppInsightsId
-            }
             openTelemetry = @{
-                metricsEndpoint = $metricsEndpoint
-                logsEndpoint = $logsEndpoint
-                tracesEndpoint = $tracesEndpoint
-                credentials = @{
-                    managedIdentity = @{
-                        resource = "https://monitor.azure.com"
-                    }
+                metricsEndpoint = @{
+                    url = $metricsEndpoint
+                }
+                logsEndpoint = @{
+                    url = $logsEndpoint
+                }
+                tracesEndpoint = @{
+                    url = $tracesEndpoint
+                }
+            }
+            authentication = @{
+                managedIdentity = @{
+                    resource = "https://monitor.azure.com"
                 }
             }
         }
@@ -463,8 +466,8 @@ if (-not $workspaceChildrenReady) {
 }
 
 $providerUri = "https://management.azure.com${workspaceResourceId}/modelProviders/foundry?api-version=$aiGatewayApiVersion"
-$providerAuth = [string](az rest --method get --uri $providerUri --query properties.foundry.authentication.kind -o tsv)
-if ($providerAuth -ne "ManagedIdentity") {
+$providerAuthResource = [string](az rest --method get --uri $providerUri --query properties.authentication.managedIdentity.resource -o tsv)
+if ($providerAuthResource -ne "https://cognitiveservices.azure.com/") {
     throw "Bicep did not configure the Foundry provider for managed identity."
 }
 
@@ -505,34 +508,38 @@ if ($githubToken.StartsWith("Bearer ", [StringComparison]::OrdinalIgnoreCase)) {
 $toolServerUri = "https://management.azure.com${workspaceResourceId}/toolServers/github?api-version=$aiGatewayApiVersion"
 $toolServerBody = @{
     properties = @{
+        toolServerType = "mcp"
         displayName = "GitHub repository digest"
         description = "Read-only GitHub tools for repository digests."
-        type = "mcp"
-        failureMode = "failClosed"
-        policies = @(
-            @{
-                type = "contentSafety"
-                hateSeverity = "Medium"
-                selfHarmSeverity = "Medium"
-                sexualSeverity = "Medium"
-                violenceSeverity = "Medium"
-            }
-        )
+        blockList = @()
+        # Temporarily disabled contentSafety policy pending 2026-11-01 Content Safety API alignment
+        policies = @()
         endpoints = @(
             @{
                 namespace = "github"
                 kind = "mcp"
+                mode = "failClosed"
                 mcp = @{
-                    url = $githubMcpServer
+                    endpoint = @{
+                        url = $githubMcpServer
+                    }
                     transport = "streamableHttp"
                 }
-                credentials = @{
-                    type = "header"
-                    headers = @{
-                        Authorization = @($githubAuthorization)
-                        "X-MCP-Readonly" = @("true")
-                        "X-MCP-Tools" = @($githubMcpTools)
-                    }
+                authentication = @{
+                    headers = @(
+                        @{
+                            name = "Authorization"
+                            value = $githubAuthorization
+                        }
+                        @{
+                            name = "X-MCP-Readonly"
+                            value = "true"
+                        }
+                        @{
+                            name = "X-MCP-Tools"
+                            value = $githubMcpTools
+                        }
+                    )
                 }
             }
         )

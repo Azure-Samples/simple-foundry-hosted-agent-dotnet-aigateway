@@ -387,7 +387,7 @@ assert_contains "$error_file" "run 'azd down'"
 assert_contains "$marker_file" "state=pending"
 
 for token in \
-  "2025-09-01-preview" \
+  "2026-11-01" \
   "Microsoft.ApiManagement/aigateways" \
   "Premium" \
   "azd-env-name" \
@@ -419,16 +419,14 @@ for postprovision_script in \
   assert_contains "$postprovision_script" "Microsoft.ApiManagement/service"
   assert_contains "$postprovision_script" "frontend.defaultHostname"
   assert_contains "$postprovision_script" "/default/models/openai/v1/chat/completions"
-  assert_contains "$postprovision_script" "contentSafety"
-  assert_contains "$postprovision_script" "hateSeverity"
-  assert_contains "$postprovision_script" "selfHarmSeverity"
-  assert_contains "$postprovision_script" "sexualSeverity"
-  assert_contains "$postprovision_script" "violenceSeverity"
-  assert_contains "$postprovision_script" "Medium"
+  assert_not_contains "$postprovision_script" "hateSeverity"
+  assert_not_contains "$postprovision_script" "selfHarmSeverity"
+  assert_not_contains "$postprovision_script" "sexualSeverity"
+  assert_not_contains "$postprovision_script" "violenceSeverity"
 done
 
-assert_contains "$repo_root/infra/scripts/configure-ai-gateway.sh" '"policies": [{'
-assert_contains "$repo_root/infra/scripts/configure-ai-gateway.ps1" 'policies = @('
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.sh" '"policies": []'
+assert_contains "$repo_root/infra/scripts/configure-ai-gateway.ps1" 'policies = @()'
 for script_file in \
   "$repo_root/infra/scripts/configure-ai-gateway.sh" \
   "$repo_root/infra/scripts/configure-ai-gateway.ps1" \

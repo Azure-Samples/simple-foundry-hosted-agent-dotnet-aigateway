@@ -60,7 +60,7 @@ The ToolServer sends these headers:
 - `X-MCP-Readonly: true`
 - `X-MCP-Tools: list_pull_requests,list_issues,actions_list`
 
-The ToolServer uses `failureMode: failClosed`. `infra/toolbox.yaml` also sets `require_approval: "never"` because the exposed tools are read-only and explicitly allowlisted.
+The ToolServer uses endpoint `mode: failClosed`. `infra/toolbox.yaml` also sets `require_approval: "never"` because the exposed tools are read-only and explicitly allowlisted.
 
 The application does not accept a GitHub token environment variable. A local or hosted agent invocation reaches GitHub only through Foundry Toolbox and AI Gateway.
 
@@ -175,7 +175,7 @@ The Bicep layout separates model, hosted-agent, and gateway resources:
 
 Module responsibilities are documented in [`infra/README.md`](../infra/README.md) and each module's README.
 
-The gateway resource is `Microsoft.ApiManagement/aigateways@2025-09-01-preview`, with `Consumption` SKU, system-assigned identity, and empty `properties: {}`. It is not a `Microsoft.ApiManagement/service` resource. Its existing `workspaces/default` resource is the parent for telemetry exporters, model providers and their catalog models, aliases, and ToolServers. Runtime `apiKeys` are direct children of the gateway, not of the workspace.
+The gateway resource is `Microsoft.ApiManagement/aigateways@2026-11-01`, with `Consumption` SKU, system-assigned identity, and empty `properties: {}`. It is not a `Microsoft.ApiManagement/service` resource. Its existing `workspaces/default` resource is the parent for telemetry exporters, model providers and their catalog models, aliases, and ToolServers. Runtime `apiKeys` are direct children of the gateway, not of the workspace.
 
 The runtime endpoint uses `properties.frontend.defaultHostname`, falling back to `properties.gatewayUrl`. Endpoint normalization preserves the existing `/default/models/openai/v1/` and `/default/toolservers/github/mcp` routes.
 

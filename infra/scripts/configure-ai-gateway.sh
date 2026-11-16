@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-AI_GATEWAY_API_VERSION="2025-09-01-preview"
+AI_GATEWAY_API_VERSION="2026-11-01"
 LEGACY_AI_GATEWAY_API_VERSION="2025-09-01-preview"
 FOUNDRY_USER_ROLE_ID="53ca6127-db72-4b80-b1b0-d745d6d5456d"
 MONITORING_METRICS_PUBLISHER_ROLE_ID="3913510d-42f4-4e42-8a64-420c390055eb"
@@ -295,9 +295,9 @@ configure_gateway_monitoring() {
     -o none
 
   exporter_uri="https://management.azure.com${gateway_resource_id}/workspaces/default/telemetryExporters/applicationInsights?api-version=${AI_GATEWAY_API_VERSION}"
-  if exporter_kind="$(az rest --method get --uri "$exporter_uri" --query properties.kind -o tsv 2>/dev/null)" &&
+  if exporter_kind="$(az rest --method get --uri "$exporter_uri" --query properties.telemetryExporterType -o tsv 2>/dev/null)" &&
     [ "$exporter_kind" != "OpenTelemetry" ]; then
-    echo "Replacing the legacy Application Insights exporter because exporter kind is immutable."
+    echo "Replacing the legacy Application Insights exporter because exporter type is immutable."
     az rest --method delete --uri "$exporter_uri" -o none
     exporter_deleted=false
     for attempt in $(seq 1 30); do
@@ -314,7 +314,7 @@ configure_gateway_monitoring() {
     fi
   fi
 
-  exporter_body="{\"properties\":{\"kind\":\"OpenTelemetry\",\"payloadCapture\":false,\"applicationInsights\":{\"resourceId\":\"$(json_escape "$gateway_app_insights_id")\"},\"openTelemetry\":{\"metricsEndpoint\":\"$(json_escape "$metrics_endpoint")\",\"logsEndpoint\":\"$(json_escape "$logs_endpoint")\",\"tracesEndpoint\":\"$(json_escape "$traces_endpoint")\",\"credentials\":{\"managedIdentity\":{\"resource\":\"https://monitor.azure.com\"}}}}}"
+  exporter_body="{\"properties\":{\"telemetryExporterType\":\"OpenTelemetry\",\"payloadCapture\":false,\"openTelemetry\":{\"metricsEndpoint\":{\"url\":\"$(json_escape "$metrics_endpoint")\"},\"logsEndpoint\":{\"url\":\"$(json_escape "$logs_endpoint")\"},\"tracesEndpoint\":{\"url\":\"$(json_escape "$traces_endpoint")\"}},\"authentication\":{\"managedIdentity\":{\"resource\":\"https://monitor.azure.com\"}}}}"
   echo "Configuring the native OpenTelemetry exporter for AI Gateway."
   az rest --method put --uri "$exporter_uri" --body "$exporter_body" -o none
 }
@@ -477,12 +477,12 @@ if [ "$workspace_children_ready" != true ]; then
   exit 1
 fi
 
-provider_auth="$(az rest \
+provider_auth_resource="$(az rest \
   --method get \
   --uri "https://management.azure.com${workspace_resource_id}/modelProviders/foundry?api-version=${AI_GATEWAY_API_VERSION}" \
-  --query properties.foundry.authentication.kind \
+  --query properties.authentication.managedIdentity.resource \
   -o tsv)"
-if [ "$provider_auth" != "ManagedIdentity" ]; then
+if [ "$provider_auth_resource" != "https://cognitiveservices.azure.com/" ]; then
   echo "Bicep did not configure the Foundry provider for managed identity." >&2
   exit 1
 fi
@@ -510,35 +510,41 @@ case "$github_token" in
   *) github_authorization="Bearer $github_token" ;;
 esac
 
+# Temporarily omit contentSafety policy pending 2026-11-01 Content Safety API alignment
 tool_server_body="$(mktemp)"
 cat > "$tool_server_body" <<EOF
 {
   "properties": {
+    "toolServerType": "mcp",
     "displayName": "GitHub repository digest",
     "description": "Read-only GitHub tools for repository digests.",
-    "type": "mcp",
-    "failureMode": "failClosed",
-    "policies": [{
-      "type": "contentSafety",
-      "hateSeverity": "Medium",
-      "selfHarmSeverity": "Medium",
-      "sexualSeverity": "Medium",
-      "violenceSeverity": "Medium"
-    }],
+    "blockList": [],
+    "policies": [],
     "endpoints": [{
       "namespace": "github",
       "kind": "mcp",
+      "mode": "failClosed",
       "mcp": {
-        "url": "$(json_escape "$GITHUB_MCP_SERVER")",
+        "endpoint": {
+          "url": "$(json_escape "$GITHUB_MCP_SERVER")"
+        },
         "transport": "streamableHttp"
       },
-      "credentials": {
-        "type": "header",
-        "headers": {
-          "Authorization": ["$(json_escape "$github_authorization")"],
-          "X-MCP-Readonly": ["true"],
-          "X-MCP-Tools": ["$(json_escape "$GITHUB_MCP_TOOLS")"]
-        }
+      "authentication": {
+        "headers": [
+          {
+            "name": "Authorization",
+            "value": "$(json_escape "$github_authorization")"
+          },
+          {
+            "name": "X-MCP-Readonly",
+            "value": "true"
+          },
+          {
+            "name": "X-MCP-Tools",
+            "value": "$(json_escape "$GITHUB_MCP_TOOLS")"
+          }
+        ]
       }
     }]
   }

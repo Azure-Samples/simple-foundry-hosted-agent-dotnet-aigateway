@@ -39,19 +39,19 @@ for policy_token in \
   "costLimit" \
   "period', 'month" \
   "amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10)" \
-  "createObject('id', 'monthly-caller-budget', 'type', 'costLimit', 'period', 'month', 'amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10), 'counterKey', createArray('identity'))" \
-  "contentSafety" \
-  "hateSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "selfHarmSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "sexualSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')" \
-  "violenceSeverity', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'contentSafetySeverity'), 'Medium')"; do
+  "createObject('id', 'monthly-caller-budget', 'type', 'costLimit', 'period', 'month', 'amount', coalesce(tryGet(parameters('foundryModels')[copyIndex()], 'costLimit'), 10), 'counterKey', createArray('identity'))"; do
   if ! grep -Fq "$policy_token" <<< "$actual_model_policies"; then
-    echo "Gateway model PUTs must include identity-keyed token limits and Medium content safety." >&2
+    echo "Gateway model PUTs must include identity-keyed token and cost limits." >&2
     echo "Missing: $policy_token" >&2
     echo "Actual: $actual_model_policies" >&2
     exit 1
   fi
 done
+if grep -Fq "contentSafety" <<< "$actual_model_policies"; then
+  echo "Gateway model PUTs must omit contentSafety pending 2026-11-01 Content Safety API alignment." >&2
+  echo "Actual: $actual_model_policies" >&2
+  exit 1
+fi
 
 gateway_sku="$(jq -r '
   .resources[]
@@ -61,6 +61,38 @@ gateway_sku="$(jq -r '
 if [ "$gateway_sku" != "Premium" ]; then
   echo "AI Gateway must use the live RP Premium SKU." >&2
   echo "Actual: $gateway_sku" >&2
+  exit 1
+fi
+
+if ! jq -e '
+  [
+    .resources[]
+    | select(.type | startswith("Microsoft.ApiManagement/aigateways"))
+    | select(.apiVersion != "2026-11-01")
+  ] | length == 0
+' "$compiled_template" >/dev/null; then
+  echo "All Microsoft.ApiManagement/aigateways resources must target apiVersion 2026-11-01." >&2
+  exit 1
+fi
+
+if ! jq -e '
+  .resources[]
+  | select(.type == "Microsoft.ApiManagement/aigateways/workspaces/modelProviders")
+  | .properties.modelProviderType == "Foundry"
+    and (.properties | has("kind") | not)
+    and (.properties.foundry.endpoint.url != null)
+    and (.properties.authentication.managedIdentity.resource != null)
+' "$compiled_template" >/dev/null; then
+  echo "Foundry modelProvider must use 2026-11-01 modelProviderType, endpoint.url, and top-level authentication." >&2
+  exit 1
+fi
+
+if ! jq -e '
+  .resources[]
+  | select(.type == "Microsoft.ApiManagement/aigateways/workspaces/modelProviders/models")
+  | (.properties | has("apiFormat") | not)
+' "$compiled_template" >/dev/null; then
+  echo "2026-11-01 model registrations must omit apiFormat." >&2
   exit 1
 fi
 
@@ -181,19 +213,22 @@ root_model_input="$(jq -r '
   | select(. != null)
 ' "$compiled_root_template")"
 for token in \
-  "OpenAIChatCompletions" \
   "/openai/v1/chat/completions" \
   "/openai/v1/responses" \
   "mul(variables('gatewayModelDeployments')[copyIndex('value')].capacity, 1000)" \
-  "'costLimit', 10" \
-  "'contentSafetySeverity', 'Medium'"; do
+  "'costLimit', 10"; do
   if ! grep -Fq "$token" <<< "$root_model_input"; then
-    echo "Root model registrations must use the live RP API, capacity-scaled token limits, and Medium content safety." >&2
+    echo "Root model registrations must use the live RP API and capacity-scaled token and cost limits." >&2
     echo "Missing: $token" >&2
     echo "Actual: $root_model_input" >&2
     exit 1
   fi
 done
+if grep -Fq "apiFormat" <<< "$root_model_input"; then
+  echo "Root model registrations must omit apiFormat on 2026-11-01." >&2
+  echo "Actual: $root_model_input" >&2
+  exit 1
+fi
 
 mini_capacity="$(jq -r '.parameters.miniModelCapacity.defaultValue' "$compiled_root_template")"
 if [ "$mini_capacity" != "200" ]; then
@@ -213,7 +248,7 @@ if ! jq -e '
     and ($module.properties.mode == "Incremental")
     and ($module.condition | contains("deployApimGatewayViaBicep") and contains("foundryAgentsProjectName"))
     and ($template.parameters.gatewayApiKey.type == "securestring")
-    and ($key | contains("listSecrets(resourceId('\''Microsoft.ApiManagement/aigateways/apiKeys'\'', parameters('\''gatewayName'\''), '\''default'\''), '\''2025-09-01-preview'\'')") and contains("primaryKey"))
+    and ($key | contains("listSecrets(resourceId('\''Microsoft.ApiManagement/aigateways/apiKeys'\'', parameters('\''gatewayName'\''), '\''default'\''), '\''2026-11-01'\'')") and contains("primaryKey"))
     and ($module.dependsOn | any(contains("Microsoft.ApiManagement/aigateways/apiKeys")))
     and ($module.dependsOn | any(contains("aiGatewayUserRoleDefinitionId")))
     and ($template.resources | length == 1)
@@ -291,7 +326,8 @@ for hook in "$repo_root/infra/scripts/configure-ai-gateway.sh" "$repo_root/infra
     'TracesIngestionEndpoint' \
     '3913510d-42f4-4e42-8a64-420c390055eb' \
     'OpenTelemetry' \
-    'credentials' \
+    'telemetryExporterType' \
+    'authentication' \
     'managedIdentity' \
     'https://monitor.azure.com' \
     'workspaces/default/telemetryExporters/applicationInsights'; do

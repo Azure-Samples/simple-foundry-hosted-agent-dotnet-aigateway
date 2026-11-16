@@ -67,7 +67,7 @@ Remove-Item Env:GH_TOKEN
 GH_TOKEN="<fine-grained-token>" azd up
 ```
 
-The provisioning hook runs an advisory (non-blocking) check of read access to the configured repository, pull requests, issues, and workflow runs before updating the ToolServer, warning rather than failing when the credential is broad or cannot read an endpoint. It never prints the token, removes legacy token values from the azd environment, configures `failureMode: failClosed`, sends `X-MCP-Readonly: true`, and restricts the ToolServer to `list_pull_requests`, `list_issues`, and `actions_list`. Agent middleware overwrites repository arguments on every tool call so callers cannot use the stored credential against another repository. These controls restrict how the sample uses the credential, but they cannot remove permissions already granted to the token. To tighten a broad login to a repo-scoped, read-only token, follow [Tighten the GitHub credential to least privilege](docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege).
+The provisioning hook runs an advisory (non-blocking) check of read access to the configured repository, pull requests, issues, and workflow runs before updating the ToolServer, warning rather than failing when the credential is broad or cannot read an endpoint. It never prints the token, removes legacy token values from the azd environment, configures endpoint `mode: failClosed`, sends `X-MCP-Readonly: true`, and restricts the ToolServer to `list_pull_requests`, `list_issues`, and `actions_list`. Agent middleware overwrites repository arguments on every tool call so callers cannot use the stored credential against another repository. These controls restrict how the sample uses the credential, but they cannot remove permissions already granted to the token. To tighten a broad login to a repo-scoped, read-only token, follow [Tighten the GitHub credential to least privilege](docs/implementation-notes.md#tighten-the-github-credential-to-least-privilege).
 
 ## Use the Gateway from the GitHub Copilot app
 
@@ -166,7 +166,7 @@ Start with [`agent/DailyRepoDigestAgent.cs`](agent/DailyRepoDigestAgent.cs). It 
 
 The OpenAI SDK requires a credential, but AI Gateway authenticates model requests with an `Api-Key` header. `DailyRepoDigestAgent` uses the built-in `ApiKeyAuthenticationPolicy` to add that header without creating a separate application concern.
 
-Infrastructure uses standalone `Microsoft.ApiManagement/aigateways@2025-09-01-preview` with the `Consumption` SKU. The default `gpt-latest` alias routes through `primary-router`: `gpt-6.1-sol` -> `gpt-6-sol` -> `gpt-5.4-mini` (deployment names `gpt-6-1-sol`, `gpt-6-sol`, and `gpt-5-4-mini`). The `gpt-mini-latest` alias uses `mini-router` to select the mini deployment directly.
+Infrastructure uses standalone `Microsoft.ApiManagement/aigateways@2026-11-01` with the `Consumption` SKU. The default `gpt-latest` alias routes through `primary-router`: `gpt-6.1-sol` -> `gpt-6-sol` -> `gpt-5.4-mini` (deployment names `gpt-6-1-sol`, `gpt-6-sol`, and `gpt-5-4-mini`). The `gpt-mini-latest` alias uses `mini-router` to select the mini deployment directly.
 
 See [`infra/README.md`](infra/README.md) for deployment modules, model defaults, and hook responsibilities.
 
